@@ -16668,9 +16668,29 @@ Optional<float> Player::GetFarSightDistance() const
     return _farSightDistance;
 }
 
+void Player::SetSightRangeCap(float cap)
+{
+    _sightRangeCap = cap;
+}
+
+Optional<float> Player::GetSightRangeCap() const
+{
+    return _sightRangeCap;
+}
+
 float Player::GetSightRange(WorldObject const* target) const
 {
     float sightRange = WorldObject::GetSightRange(target);
+
+    // The sight cap lowers only the plain map range of a world map: instance maps, Wintergrasp, cinematics and
+    // objects with their own visibility distance keep their ranges. Far sight is added on top as before.
+    if (_sightRangeCap && sightRange > *_sightRangeCap && (!target || !target->IsVisibilityOverridden()))
+    {
+        Map const* map = FindMap();
+        if (map && map->IsWorldMap() && sightRange == map->GetVisibilityRange())
+            sightRange = *_sightRangeCap;
+    }
+
     if (_farSightDistance)
         sightRange += *_farSightDistance;
 

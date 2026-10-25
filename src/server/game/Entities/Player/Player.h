@@ -2670,6 +2670,10 @@ public:
     void ResetFarSightDistance();
     [[nodiscard]] Optional<float> GetFarSightDistance() const;
 
+    // Per-player cap on the sight range (e.g. for bots): lowers only the plain map range of a world map; unset = off
+    void SetSightRangeCap(float cap);
+    [[nodiscard]] Optional<float> GetSightRangeCap() const;
+
     float GetSightRange(WorldObject const* target = nullptr) const override;
     bool IsWorldObjectOutOfSightRange(WorldObject const* target) const;
 
@@ -3072,6 +3076,7 @@ private:
     WorldLocation _corpseLocation;
 
     Optional<float> _farSightDistance = { };
+    Optional<float> _sightRangeCap = { };
 
     bool _wasOutdoor;
 

@@ -1693,7 +1693,16 @@ float WorldObject::GetGridActivationRange() const
         {
             return DEFAULT_VISIBILITY_INSTANCE;
         }
-        return IsInWintergrasp() ? VISIBILITY_DIST_WINTERGRASP : GetMap()->GetVisibilityRange();
+        if (IsInWintergrasp())
+            return VISIBILITY_DIST_WINTERGRASP;
+
+        // A per-player sight cap lowers the map range of a world map (see Player::GetSightRange)
+        float const mapRange = GetMap()->GetVisibilityRange();
+        Optional<float> const sightRangeCap = ToPlayer()->GetSightRangeCap();
+        if (sightRangeCap && *sightRangeCap < mapRange && GetMap()->IsWorldMap())
+            return *sightRangeCap;
+
+        return mapRange;
     }
     else if (ToCreature())
     {
