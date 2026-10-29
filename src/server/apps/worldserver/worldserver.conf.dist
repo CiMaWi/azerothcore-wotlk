@@ -1414,6 +1414,20 @@ CheckGameObjectLoS = 1
 PreloadAllNonInstancedMapGrids = 0
 
 #
+#    Creature.ContinentSpawnFilter
+#        Description: Which creatures of the creature table the continents (Eastern Kingdoms,
+#                     Kalimdor, Outland, Northrend) spawn when one of their grids loads. Meant for a
+#                     server that hosts only arena matches, whose players wait in the cities between
+#                     matches: the other creatures cost CPU and memory there for nothing. Instances,
+#                     battlegrounds and arenas always spawn all their creatures; game objects and
+#                     transports are not affected. Read once, at the first grid load (a change needs
+#                     a restart).
+#        Default:     0 - (All creatures)
+#                     1 - (Only battlemasters (npcflag 0x100000), which the arena queue needs)
+
+Creature.ContinentSpawnFilter = 0
+
+#
 #     DontCacheRandomMovementPaths
 #        Description: Random movement paths (calculated using MoveMaps) can be cached to save cpu time,
 #                     but this may use up considerable amount of memory and can be prevented by setting this option to 1.

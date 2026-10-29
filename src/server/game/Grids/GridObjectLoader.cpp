@@ -17,11 +17,13 @@
 
 #include "GridObjectLoader.h"
 #include "CellImpl.h"
+#include "Config.h"
 #include "Corpse.h"
 #include "Creature.h"
 #include "DynamicObject.h"
 #include "GameObject.h"
 #include "GridNotifiers.h"
+#include "Log.h"
 #include "ObjectMgr.h"
 #include "PoolMgr.h"
 #include "Transport.h"
@@ -37,13 +39,51 @@ void GridObjectLoader::AddObjectHelper(Map* map, T* obj)
     obj->AddToWorld();
 }
 
+namespace
+{
+    // Creature.ContinentSpawnFilter = 1 (an arena-only server): read once, at the first grid load
+    bool ContinentSpawnsBattlemastersOnly()
+    {
+        static bool const battlemastersOnly = []
+        {
+            bool const on = sConfigMgr->GetOption<uint32>("Creature.ContinentSpawnFilter", 0) == 1;
+            if (on)
+                LOG_INFO("server.loading", "Creature.ContinentSpawnFilter = 1: continents spawn battlemasters only");
+
+            return on;
+        }();
+
+        return battlemastersOnly;
+    }
+
+    bool IsBattlemasterSpawn(CreatureData const* data)
+    {
+        for (uint32 const entry : { data->id, data->id2, data->id3 })
+        {
+            CreatureTemplate const* cInfo = entry ? sObjectMgr->GetCreatureTemplate(entry) : nullptr;
+            if (cInfo && (cInfo->npcflag & UNIT_NPC_FLAG_BATTLEMASTER))
+                return true;
+        }
+
+        return false;
+    }
+}
+
 void GridObjectLoader::LoadCreatures(CellGuidSet const& guid_set, Map* map)
 {
+    // Creature.ContinentSpawnFilter: a continent spawns only its battlemasters (instances, battlegrounds and arenas
+    // are never filtered); off by default
+    bool const battlemastersOnly = map->GetEntry() && map->GetEntry()->IsContinent() &&
+        ContinentSpawnsBattlemastersOnly();
+
     for (ObjectGuid::LowType const& guid : guid_set)
     {
         // Skip spawns whose spawn group is not active on this map
         CreatureData const* cData = sObjectMgr->GetCreatureData(guid);
         if (cData && !map->IsSpawnGroupActive(cData->spawnGroupId))
+            continue;
+
+        if (battlemastersOnly && (!cData || !IsBattlemasterSpawn(cData)))
             continue;
 
         // Skip pool members this map's pool state has not rolled as spawned
