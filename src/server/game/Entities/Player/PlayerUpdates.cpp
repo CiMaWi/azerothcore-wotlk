@@ -1710,7 +1710,9 @@ void Player::UpdateVisibilityOf(T* target, UpdateData& data,
         {
             BeforeVisibilityDestroy<T>(target, this);
 
-            target->BuildOutOfRangeUpdateBlock(&data);
+            // No client behind the session (bots): unlink only, no out-of-range block
+            if (!GetSession()->IsSocketClosed())
+                target->BuildOutOfRangeUpdateBlock(&data);
             GetObjectVisibilityContainer().UnlinkWorldObjectVisibility(target);
         }
     }
@@ -1718,6 +1720,7 @@ void Player::UpdateVisibilityOf(T* target, UpdateData& data,
     {
         if (CanSeeOrDetect(target, false, true))
         {
+            // Builds nothing for a session without a socket; the link is kept, broadcasts and bot AI use it
             target->BuildCreateUpdateBlockForPlayer(&data, this);
             UpdateVisibilityOf_helper(this, target, visibleNow);
         }
@@ -1726,6 +1729,10 @@ void Player::UpdateVisibilityOf(T* target, UpdateData& data,
 
 void Player::GetInitialVisiblePackets(Unit* target)
 {
+    // Aura and melee-start packets for this client only: nothing to send without a socket
+    if (GetSession()->IsSocketClosed())
+        return;
+
     GetAurasForTarget(target);
     if (target->IsAlive())
     {
@@ -1737,6 +1744,8 @@ void Player::GetInitialVisiblePackets(Unit* target)
 
 void Player::UpdateVisibilityOf(WorldObject* target)
 {
+    // Without a socket (bots) DestroyForPlayer, SendUpdateToPlayer and GetInitialVisiblePackets send nothing; the
+    // visibility links still change
     if (HaveAtClient(target))
     {
         if (!CanSeeOrDetect(target, false, true))

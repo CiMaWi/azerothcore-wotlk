@@ -1826,6 +1826,7 @@ void Map::SendObjectUpdates()
         obj->BuildUpdate(update_players);
     }
 
+    // Players without a socket (bots) get no entry here: Object::BuildFieldsUpdate skips them
     WorldPacket packet;                                     // here we allocate a std::vector with a size of 0x10000
     for (UpdateDataMapType::iterator iter = update_players.begin(); iter != update_players.end(); ++iter)
     {

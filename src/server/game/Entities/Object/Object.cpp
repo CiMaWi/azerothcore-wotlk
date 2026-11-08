@@ -186,21 +186,34 @@ void Object::BuildMovementUpdateBlock(UpdateData* data, uint32 flags) const
     data->AddUpdateBlock(buf);
 }
 
+// Whether no client is behind the player's session (a bot, a test player, a real player whose client is gone), so
+// update blocks and packets built for it would be thrown away. Read only; m_Socket is cleared on the world thread only,
+// which waits while the map threads run.
+static bool HasNoSocket(Player const* player)
+{
+    WorldSession const* session = player->GetSession();
+    return !session || session->IsHeadless() || session->IsSocketClosed();
+}
+
 // Counts a block built inside a metrics-on Map::Update (MapSectionStats.h), by whether the target's session has a
-// socket. Read only; m_Socket is cleared on the world thread only, which waits while the map threads run.
+// socket.
 static void CountMapBlock(uint32 (&counters)[MAX_MAP_BLOCK_TARGETS], Player const* target)
 {
     if (!mapSectionStats.on)
         return;
 
-    WorldSession const* session = target->GetSession();
-    bool const noSocket = !session || session->IsHeadless() || session->IsSocketClosed();
-    ++counters[noSocket ? MAP_BLOCK_NO_SOCKET : MAP_BLOCK_SOCKET];
+    ++counters[HasNoSocket(target) ? MAP_BLOCK_NO_SOCKET : MAP_BLOCK_SOCKET];
 }
 
 void Object::BuildCreateUpdateBlockForPlayer(UpdateData* data, Player* target)
 {
     if (!target)
+        return;
+
+    // No client behind the target's session: build nothing. Every caller sends the block to the target only, and
+    // the visibility callers keep the target's visibility set (Player::UpdateVisibilityOf); a player logging in
+    // again gets a fresh create list (CleanVisibilityReferences at login).
+    if (HasNoSocket(target))
         return;
 
     CountMapBlock(mapSectionStats.createBuilt, target);
@@ -259,6 +272,10 @@ void Object::BuildCreateUpdateBlockForPlayer(UpdateData* data, Player* target)
 
 void Object::SendUpdateToPlayer(Player* player)
 {
+    // No client behind the session: nothing to send
+    if (HasNoSocket(player))
+        return;
+
     // send create update to player
     UpdateData upd;
     WorldPacket packet;
@@ -288,6 +305,10 @@ void Object::BuildOutOfRangeUpdateBlock(UpdateData* data) const
 void Object::DestroyForPlayer(Player* target, bool onDeath) const
 {
     ASSERT(target);
+
+    // No client behind the session: nothing to send
+    if (HasNoSocket(target))
+        return;
 
     if (IsUnit() || isType(TYPEMASK_PLAYER))
     {
@@ -558,6 +579,11 @@ void Object::ClearUpdateMask(bool remove)
 
 void Object::BuildFieldsUpdate(Player* player, UpdateDataMapType& data_map)
 {
+    // No client behind the session: no values block and no UpdateData entry, which Map::SendObjectUpdates would only
+    // throw away. The caller (BuildUpdate) still clears the update mask.
+    if (HasNoSocket(player))
+        return;
+
     UpdateDataMapType::iterator iter = data_map.find(player);
 
     if (iter == data_map.end())

@@ -21,6 +21,7 @@
 #include "Transport.h"
 #include "UpdateData.h"
 #include "WorldPacket.h"
+#include "WorldSession.h"
 
 using namespace Acore;
 
@@ -58,6 +59,10 @@ void VisibleNotifier::SendToSelf()
         }
     }
 
+    // No client behind the session (bots): the visibility set still changes, but i_data stays empty (create blocks are
+    // not built for it either), so no packet and no initial aura/attack packets follow
+    bool const hasClient = !i_player.GetSession()->IsSocketClosed();
+
     VisibleWorldObjectsMap* visibleWorldObjects = i_player.GetObjectVisibilityContainer().GetVisibleWorldObjectsMap();
     for (VisibleWorldObjectsMap::iterator itr = visibleWorldObjects->begin(); itr != visibleWorldObjects->end();)
     {
@@ -69,7 +74,8 @@ void VisibleNotifier::SendToSelf()
             continue;
         }
 
-        i_data.AddOutOfRangeGUID(obj->GetGUID());
+        if (hasClient)
+            i_data.AddOutOfRangeGUID(obj->GetGUID());
 
         if (Player* objPlayer = obj->ToPlayer())
             objPlayer->UpdateVisibilityOf(&i_player);
