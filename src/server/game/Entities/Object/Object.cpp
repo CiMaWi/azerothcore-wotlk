@@ -28,6 +28,7 @@
 #include "GridNotifiers.h"
 #include "Log.h"
 #include "MapMgr.h"
+#include "MapSectionStats.h"
 #include "MiscPackets.h"
 #include "MovementPacketBuilder.h"
 #include "ObjectAccessor.h"
@@ -56,6 +57,7 @@
 #include "Vehicle.h"
 #include "World.h"
 #include "WorldPacket.h"
+#include "WorldSession.h"
 
 /// @todo: this import is not necessary for compilation and marked as unused by the IDE
 //  however, for some reasons removing it would cause a damn linking issue
@@ -184,10 +186,24 @@ void Object::BuildMovementUpdateBlock(UpdateData* data, uint32 flags) const
     data->AddUpdateBlock(buf);
 }
 
+// Counts a block built inside a metrics-on Map::Update (MapSectionStats.h), by whether the target's session has a
+// socket. Read only; m_Socket is cleared on the world thread only, which waits while the map threads run.
+static void CountMapBlock(uint32 (&counters)[MAX_MAP_BLOCK_TARGETS], Player const* target)
+{
+    if (!mapSectionStats.on)
+        return;
+
+    WorldSession const* session = target->GetSession();
+    bool const noSocket = !session || session->IsHeadless() || session->IsSocketClosed();
+    ++counters[noSocket ? MAP_BLOCK_NO_SOCKET : MAP_BLOCK_SOCKET];
+}
+
 void Object::BuildCreateUpdateBlockForPlayer(UpdateData* data, Player* target)
 {
     if (!target)
         return;
+
+    CountMapBlock(mapSectionStats.createBuilt, target);
 
     uint8  updatetype = UPDATETYPE_CREATE_OBJECT;
     uint16 flags      = m_updateFlag;
@@ -551,6 +567,7 @@ void Object::BuildFieldsUpdate(Player* player, UpdateDataMapType& data_map)
         iter = p.first;
     }
 
+    CountMapBlock(mapSectionStats.valuesBuilt, player);
     BuildValuesUpdateBlockForPlayer(&iter->second, iter->first);
 }
 

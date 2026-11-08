@@ -30,6 +30,7 @@
 #include "LFGMgr.h"
 #include "MapGrid.h"
 #include "MapInstanced.h"
+#include "MapSectionStats.h"
 #include "Metric.h"
 #include "MiscPackets.h"
 #include "Object.h"
@@ -433,10 +434,71 @@ void Map::UpdatePlayerZoneStats(uint32 oldZone, uint32 newZone)
         ++_zonePlayerCountMap[newZone];
 }
 
+// Names of the map_section_us sections in MapUpdateSection order, and whether a short tick (t_diff == 0) runs them.
+// Both tables are positional: a new MapUpdateSection entry needs a name and a short-tick flag at the same index.
+static constexpr char const* MapSectionNames[] =
+{
+    "sessions", "player_update", "events", "respawns", "mark_cells", "non_player_objects", "send_object_updates",
+    "scripts", "moves", "delayed_visibility", "rest"
+};
+static constexpr bool MapSectionInShortTick[] =
+{
+    true, true, true, false, false, false, false, false, false, true, false
+};
+static_assert(sizeof(MapSectionNames) / sizeof(MapSectionNames[0]) == MAX_MAP_SECTIONS,
+    "MapSectionNames must name every MapUpdateSection");
+static_assert(sizeof(MapSectionInShortTick) / sizeof(MapSectionInShortTick[0]) == MAX_MAP_SECTIONS,
+    "MapSectionInShortTick must flag every MapUpdateSection");
+static_assert(MAP_SECTION_DELAYED_VISIBILITY == 9 && MAP_SECTION_REST == 10,
+    "MapSectionNames and MapSectionInShortTick follow the MapUpdateSection order");
+
+// Sends this map update's section times (us) and counters, one value each; only when Map::Update armed the stats.
+static void SendMapSectionStats(uint32 mapId, uint32 players, bool full)
+{
+    MapSectionStats& stats = mapSectionStats;
+    if (!stats.on)
+        return;
+
+    stats.on = false;
+    std::string const id = std::to_string(mapId);
+    std::string const fullTag = full ? "1" : "0";
+    for (uint8 i = 0; i < MAX_MAP_SECTIONS; ++i)
+    {
+        if (!full && !MapSectionInShortTick[i])
+            continue;
+
+        METRIC_VALUE("map_section_us", uint64((stats.sectionNs[i] + 500) / 1000), METRIC_TAG("map_id", id),
+            METRIC_TAG("section", MapSectionNames[i]), METRIC_TAG("full", fullTag));
+    }
+
+    METRIC_VALUE("map_counter", uint64(players), METRIC_TAG("map_id", id), METRIC_TAG("counter", "players"));
+    METRIC_VALUE("map_counter", uint64(stats.playerUpdates), METRIC_TAG("map_id", id),
+        METRIC_TAG("counter", "player_updates"));
+    METRIC_VALUE("map_counter", uint64(stats.valuesBuilt[MAP_BLOCK_SOCKET]), METRIC_TAG("map_id", id),
+        METRIC_TAG("counter", "values_socket"));
+    METRIC_VALUE("map_counter", uint64(stats.valuesBuilt[MAP_BLOCK_NO_SOCKET]), METRIC_TAG("map_id", id),
+        METRIC_TAG("counter", "values_nosocket"));
+    METRIC_VALUE("map_counter", uint64(stats.createBuilt[MAP_BLOCK_SOCKET]), METRIC_TAG("map_id", id),
+        METRIC_TAG("counter", "create_socket"));
+    METRIC_VALUE("map_counter", uint64(stats.createBuilt[MAP_BLOCK_NO_SOCKET]), METRIC_TAG("map_id", id),
+        METRIC_TAG("counter", "create_nosocket"));
+}
+
 void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
 {
+    // Section timing and counters (MapSectionStats.h): armed only with metrics on and players on the map
+    uint32 const players = m_mapRefMgr.getSize();
+    bool const timed = players && sMetric->IsEnabled();
+    if (timed)
+        mapSectionStats = MapSectionStats();
+
+    mapSectionStats.on = timed;
+    MapSectionClock clock(timed);
+
     if (t_diff)
         _mapCollisionData.GetDynamicTree().update(t_diff);
+
+    clock.Lap(MAP_SECTION_REST);
 
     // Update world sessions and players
     for (m_mapRefIter = m_mapRefMgr.begin(); m_mapRefIter != m_mapRefMgr.end(); ++m_mapRefIter)
@@ -448,18 +510,26 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
             WorldSession* session = player->GetSession();
             MapSessionFilter updater(session);
             session->Update(s_diff, updater);
+            clock.Lap(MAP_SECTION_SESSIONS);
 
             // update players at tick
             if (!t_diff)
+            {
                 player->Update(s_diff);
+                ++mapSectionStats.playerUpdates;
+                clock.Lap(MAP_SECTION_PLAYER_UPDATE);
+            }
         }
     }
 
     Events.Update(t_diff);
+    clock.Lap(MAP_SECTION_EVENTS);
 
     if (!t_diff)
     {
         HandleDelayedVisibility();
+        clock.Lap(MAP_SECTION_DELAYED_VISIBILITY);
+        SendMapSectionStats(GetId(), players, false);
         return;
     }
 
@@ -475,8 +545,11 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
             _respawnCheckTimer -= t_diff;
     }
 
+    clock.Lap(MAP_SECTION_RESPAWNS);
+
     _updatableObjectListRecheckTimer.Update(t_diff);
     resetMarkedCells();
+    clock.Lap(MAP_SECTION_MARK_CELLS);
 
     // Update players
     for (m_mapRefIter = m_mapRefMgr.begin(); m_mapRefIter != m_mapRefMgr.end(); ++m_mapRefIter)
@@ -487,6 +560,8 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
             continue;
 
         player->Update(s_diff);
+        ++mapSectionStats.playerUpdates;
+        clock.Lap(MAP_SECTION_PLAYER_UPDATE);
 
         if (_updatableObjectListRecheckTimer.Passed())
         {
@@ -500,12 +575,16 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
                 else if (DynamicObject* viewObject = viewPoint->ToDynObject())
                     MarkNearbyCellsOf(viewObject);
             }
+
+            clock.Lap(MAP_SECTION_MARK_CELLS);
         }
     }
 
     UpdateNonPlayerObjects(t_diff);
+    clock.Lap(MAP_SECTION_NON_PLAYER_OBJECTS);
 
     SendObjectUpdates();
+    clock.Lap(MAP_SECTION_SEND_OBJECT_UPDATES);
 
     ///- Process necessary scripts
     if (!m_scriptSchedule.empty())
@@ -515,11 +594,15 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
         i_scriptLock = false;
     }
 
+    clock.Lap(MAP_SECTION_SCRIPTS);
+
     MoveAllCreaturesInMoveList();
     MoveAllGameObjectsInMoveList();
     MoveAllDynamicObjectsInMoveList();
+    clock.Lap(MAP_SECTION_MOVES);
 
     HandleDelayedVisibility();
+    clock.Lap(MAP_SECTION_DELAYED_VISIBILITY);
 
     UpdatePlayersRedirectKickEvent(t_diff);
 
@@ -527,6 +610,7 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
     UpdateExpiredCorpses(t_diff);
 
     sScriptMgr->OnMapUpdate(this, t_diff);
+    clock.Lap(MAP_SECTION_REST);
 
     METRIC_VALUE("map_creatures", uint64(GetObjectsStore().Size<Creature>()),
         METRIC_TAG("map_id", std::to_string(GetId())),
@@ -535,6 +619,8 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
     METRIC_VALUE("map_gameobjects", uint64(GetObjectsStore().Size<GameObject>()),
         METRIC_TAG("map_id", std::to_string(GetId())),
         METRIC_TAG("map_instanceid", std::to_string(GetInstanceId())));
+
+    SendMapSectionStats(GetId(), players, true);
 }
 
 void Map::UpdateNonPlayerObjects(uint32 const diff)
