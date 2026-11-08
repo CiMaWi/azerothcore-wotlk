@@ -34,7 +34,12 @@
 #include "TC9Sidecar.h"
 #include "Transport.h"
 #include "World.h"
+#include "StringFormat.h"
 #include "WorldPacket.h"
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <vector>
 
 MapMgr::MapMgr()
 {
@@ -266,14 +271,75 @@ void MapMgr::Update(uint32 diff)
         }
     }
 
-    MapMapType::iterator iter = i_maps.begin();
-    for (; iter != i_maps.end(); ++iter)
+    // Hand the map tasks to the workers largest first (most players), so a big continent starts at once and small
+    // instances fill the gaps. World thread only; the buffer keeps its capacity between ticks.
+    struct MapTask
     {
-        bool full = mapUpdateStep < 3 && ((mapUpdateStep == 0 && !iter->second->IsBattlegroundOrArena() && !iter->second->IsDungeon()) || (mapUpdateStep == 1 && iter->second->IsBattlegroundOrArena()) || (mapUpdateStep == 2 && iter->second->IsDungeon()));
+        uint32 playerCount;
+        uint32 mapId;
+        uint32 instanceId;
+        Map* map;
+    };
+
+    static std::vector<MapTask> tasks;
+    tasks.clear();
+    for (auto const& mapPair : i_maps)
+    {
+        Map* map = mapPair.second;
+        tasks.push_back({ map->GetPlayers().getSize(), map->GetId(), map->GetInstanceId(), map });
+    }
+
+    std::sort(tasks.begin(), tasks.end(), [](MapTask const& a, MapTask const& b)
+    {
+        if (a.playerCount != b.playerCount)
+            return a.playerCount > b.playerCount;
+        if (a.mapId != b.mapId)
+            return a.mapId < b.mapId;
+        return a.instanceId < b.instanceId;
+    });
+
+    // Debug line "maps.order": top 5 as mapId/instanceId=players, when the top 3 changed, at most once per 10 s.
+    // Enable with e.g. Logger.maps.order=5,Server (and an appender level that allows debug).
+    {
+        static constexpr size_t TOP_LOGGED = 5;
+        static constexpr size_t TOP_COMPARED = 3;
+        static constexpr std::chrono::seconds LOG_INTERVAL{ 10 };
+        static std::array<std::pair<uint32, uint32>, TOP_COMPARED> lastTop{};
+        static size_t lastTopCount = 0;
+        static std::chrono::steady_clock::time_point lastLog{};
+
+        size_t const topCount = std::min(tasks.size(), TOP_COMPARED);
+        bool changed = topCount != lastTopCount;
+        for (size_t i = 0; i < topCount && !changed; ++i)
+            changed = lastTop[i] != std::make_pair(tasks[i].mapId, tasks[i].instanceId);
+
+        auto const now = std::chrono::steady_clock::now();
+        if (changed && !tasks.empty() && now - lastLog >= LOG_INTERVAL)
+        {
+            lastLog = now;
+            lastTopCount = topCount;
+            for (size_t i = 0; i < topCount; ++i)
+                lastTop[i] = { tasks[i].mapId, tasks[i].instanceId };
+
+            if (sLog->ShouldLog("maps.order", LogLevel::LOG_LEVEL_DEBUG))
+            {
+                std::string order;
+                for (size_t i = 0; i < std::min(tasks.size(), TOP_LOGGED); ++i)
+                    order += Acore::StringFormat("{}{}/{}={}", i ? " " : "", tasks[i].mapId, tasks[i].instanceId,
+                        tasks[i].playerCount);
+                LOG_DEBUG("maps.order", "Map task order (mapId/instanceId=players, of {} maps): {}", tasks.size(), order);
+            }
+        }
+    }
+
+    for (MapTask const& task : tasks)
+    {
+        Map* map = task.map;
+        bool full = mapUpdateStep < 3 && ((mapUpdateStep == 0 && !map->IsBattlegroundOrArena() && !map->IsDungeon()) || (mapUpdateStep == 1 && map->IsBattlegroundOrArena()) || (mapUpdateStep == 2 && map->IsDungeon()));
         if (m_updater.activated())
-            m_updater.schedule_update(*iter->second, uint32(full ? i_timer[mapUpdateStep].GetCurrent() : 0), diff);
+            m_updater.schedule_update(*map, uint32(full ? i_timer[mapUpdateStep].GetCurrent() : 0), diff);
         else
-            iter->second->Update(uint32(full ? i_timer[mapUpdateStep].GetCurrent() : 0), diff);
+            map->Update(uint32(full ? i_timer[mapUpdateStep].GetCurrent() : 0), diff);
     }
 
     if (m_updater.activated())
@@ -281,7 +347,7 @@ void MapMgr::Update(uint32 diff)
 
     if (mapUpdateStep < 3)
     {
-        for (iter = i_maps.begin(); iter != i_maps.end(); ++iter)
+        for (MapMapType::iterator iter = i_maps.begin(); iter != i_maps.end(); ++iter)
         {
             bool full = ((mapUpdateStep == 0 && !iter->second->IsBattlegroundOrArena() && !iter->second->IsDungeon()) || (mapUpdateStep == 1 && iter->second->IsBattlegroundOrArena()) || (mapUpdateStep == 2 && iter->second->IsDungeon()));
             if (full)
