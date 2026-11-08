@@ -99,6 +99,7 @@
 #include "WorldPacket.h"
 #include "WorldSession.h"
 #include "WorldSessionMgr.h"
+#include "WorldDay.h"
 #include "WorldState.h"
 #include "WorldStateDefines.h"
 #include <boost/asio/ip/address.hpp>
@@ -115,6 +116,56 @@ float World::_maxVisibleDistanceInInstances  = DEFAULT_VISIBILITY_INSTANCE;
 float World::_maxVisibleDistanceInBGArenas   = DEFAULT_VISIBILITY_BGARENAS;
 
 Realm realm;
+
+namespace
+{
+    namespace WorldDay = Acore::WorldDay;
+
+    // A world day of 24 hours keeps the calendar schedule; any other length counts world days of running time
+    bool IsCalendarDay()
+    {
+        return WorldDay::IsRealDay(WorldDay::DaySeconds(sWorld->getFloatConfig(CONFIG_WORLD_DAY_HOURS)));
+    }
+
+    int64 WorldDayPeriod(uint32 worldDays)
+    {
+        return WorldDay::PeriodSeconds(WorldDay::DaySeconds(sWorld->getFloatConfig(CONFIG_WORLD_DAY_HOURS)), worldDays);
+    }
+
+    // The stored next reset at load (or at a world day change), pulled in to one period from now
+    Seconds InitWorldDayReset(uint32 worldState, uint32 worldDays)
+    {
+        Seconds const stored = Seconds(sWorldState->getWorldState(worldState));
+        Seconds const next = Seconds(WorldDay::ClampNext(GameTime::GetGameTime().count(), stored.count(),
+            WorldDayPeriod(worldDays)));
+        if (next != stored)
+            sWorldState->setWorldState(worldState, next.count());
+
+        return next;
+    }
+
+    // The reset after the one that just fired, on the grid of the previous ones
+    Seconds NextWorldDayReset(Seconds previous, uint32 worldDays)
+    {
+        return Seconds(WorldDay::NextAfter(GameTime::GetGameTime().count(), previous.count(),
+            WorldDayPeriod(worldDays)));
+    }
+
+    void LogWorldDayReset(std::string_view reset, Seconds next)
+    {
+        LOG_INFO("server.worldserver", "World day: {} reset fired, next at {} (in {} s, world day {} h)", reset,
+            next.count(), (next - GameTime::GetGameTime()).count(), sWorld->getFloatConfig(CONFIG_WORLD_DAY_HOURS));
+    }
+
+    void LogWorldDaySchedule(Seconds daily, Seconds weekly, Seconds monthly, Seconds randomBG, Seconds calendar,
+        Seconds guild)
+    {
+        LOG_INFO("server.worldserver", "World day: {} h (now {}); next daily quest {}, weekly quest {}, "
+            "monthly quest {}, random BG {}, calendar {} (0 = at the first update), guild {}",
+            sWorld->getFloatConfig(CONFIG_WORLD_DAY_HOURS), GameTime::GetGameTime().count(), daily.count(),
+            weekly.count(), monthly.count(), randomBG.count(), calendar.count(), guild.count());
+    }
+}
 
 /// World constructor
 World::World()
@@ -192,6 +243,7 @@ void World::LoadConfigSettings(bool reload)
     ///- Read the player limit from the config file
     sWorldSessionMgr->SetPlayerAmountLimit(sConfigMgr->GetOption<int32>("PlayerLimit", 1000));
 
+    float const previousDayHours = reload ? getFloatConfig(CONFIG_WORLD_DAY_HOURS) : 0.0f;
     _worldConfig.Initialize(reload);
 
     ApplyMoveSpeedRates(getRate(RATE_MOVESPEED_NPC), getRate(RATE_MOVESPEED_PLAYER));
@@ -208,6 +260,23 @@ void World::LoadConfigSettings(bool reload)
 
         _timers[WUPDATE_AUTOBROADCAST].SetInterval(getIntConfig(CONFIG_AUTOBROADCAST_INTERVAL));
         _timers[WUPDATE_AUTOBROADCAST].Reset();
+
+        // A changed world day applies at once: resets stored under a longer one are pulled in
+        if (getFloatConfig(CONFIG_WORLD_DAY_HOURS) != previousDayHours)
+        {
+            InitDailyQuestResetTime();
+            InitWeeklyQuestResetTime();
+            InitMonthlyQuestResetTime();
+            InitRandomBGResetTime();
+            InitGuildResetTime();
+            if (!IsCalendarDay())
+                _nextCalendarOldEventsDeletionTime = InitWorldDayReset(
+                    WORLD_STATE_CUSTOM_DAILY_CALENDAR_DELETION_OLD_EVENTS_TIME, WorldDay::DailyDays);
+
+            sBattlegroundMgr->InitAutomaticArenaPointDistribution();
+            LogWorldDaySchedule(_nextDailyQuestReset, _nextWeeklyQuestReset, _nextMonthlyQuestReset, _nextRandomBGReset,
+                _nextCalendarOldEventsDeletionTime, _nextGuildReset);
+        }
     }
 
     if (getIntConfig(CONFIG_CLIENTCACHE_VERSION) == 0)
@@ -1007,6 +1076,8 @@ void World::SetInitialWorldSettings()
     LOG_INFO("server.loading", "Calculate Guild Cap Reset Time...");
     LOG_INFO("server.loading", " ");
     InitGuildResetTime();
+    LogWorldDaySchedule(_nextDailyQuestReset, _nextWeeklyQuestReset, _nextMonthlyQuestReset, _nextRandomBGReset,
+        _nextCalendarOldEventsDeletionTime, _nextGuildReset);
 
     LOG_INFO("server.loading", "Load Petitions...");
     sPetitionMgr->LoadPetitions();
@@ -1766,6 +1837,12 @@ void World::_UpdateRealmCharCount(PreparedQueryResult resultCharCount,uint32 acc
 
 void World::InitWeeklyQuestResetTime()
 {
+    if (!IsCalendarDay())
+    {
+        _nextWeeklyQuestReset = InitWorldDayReset(WORLD_STATE_CUSTOM_WEEKLY_QUEST_RESET_TIME, WorldDay::WeeklyDays);
+        return;
+    }
+
     Seconds wstime = Seconds(sWorldState->getWorldState(WORLD_STATE_CUSTOM_WEEKLY_QUEST_RESET_TIME));
     _nextWeeklyQuestReset = wstime > 0s ? wstime : Seconds(Acore::Time::GetNextTimeWithDayAndHour(4, 6));
 
@@ -1777,6 +1854,12 @@ void World::InitWeeklyQuestResetTime()
 
 void World::InitDailyQuestResetTime()
 {
+    if (!IsCalendarDay())
+    {
+        _nextDailyQuestReset = InitWorldDayReset(WORLD_STATE_CUSTOM_DAILY_QUEST_RESET_TIME, WorldDay::DailyDays);
+        return;
+    }
+
     Seconds wstime = Seconds(sWorldState->getWorldState(WORLD_STATE_CUSTOM_DAILY_QUEST_RESET_TIME));
     _nextDailyQuestReset = wstime > 0s ? wstime : Seconds(Acore::Time::GetNextTimeWithDayAndHour(-1, 6));
 
@@ -1788,6 +1871,12 @@ void World::InitDailyQuestResetTime()
 
 void World::InitMonthlyQuestResetTime()
 {
+    if (!IsCalendarDay())
+    {
+        _nextMonthlyQuestReset = InitWorldDayReset(WORLD_STATE_CUSTOM_MONTHLY_QUEST_RESET_TIME, WorldDay::MonthlyDays);
+        return;
+    }
+
     Seconds wstime = Seconds(sWorldState->getWorldState(WORLD_STATE_CUSTOM_MONTHLY_QUEST_RESET_TIME));
     _nextMonthlyQuestReset = wstime > 0s ? wstime : Seconds(Acore::Time::GetNextTimeWithDayAndHour(-1, 6));
 
@@ -1799,6 +1888,12 @@ void World::InitMonthlyQuestResetTime()
 
 void World::InitRandomBGResetTime()
 {
+    if (!IsCalendarDay())
+    {
+        _nextRandomBGReset = InitWorldDayReset(WORLD_STATE_CUSTOM_BG_DAILY_RESET_TIME, WorldDay::DailyDays);
+        return;
+    }
+
     Seconds wstime = Seconds(sWorldState->getWorldState(WORLD_STATE_CUSTOM_BG_DAILY_RESET_TIME));
     _nextRandomBGReset = wstime > 0s ? wstime : Seconds(Acore::Time::GetNextTimeWithDayAndHour(-1, getIntConfig(CONFIG_RANDOM_BG_RESET_HOUR)));
 
@@ -1821,6 +1916,12 @@ void World::InitCalendarOldEventsDeletionTime()
 
 void World::InitGuildResetTime()
 {
+    if (!IsCalendarDay())
+    {
+        _nextGuildReset = InitWorldDayReset(WORLD_STATE_CUSTOM_GUILD_DAILY_RESET_TIME, WorldDay::DailyDays);
+        return;
+    }
+
     Seconds wstime = Seconds(sWorldState->getWorldState(WORLD_STATE_CUSTOM_GUILD_DAILY_RESET_TIME));
     _nextGuildReset = wstime > 0s ? wstime : Seconds(Acore::Time::GetNextTimeWithDayAndHour(-1, 6));
 
@@ -1840,8 +1941,13 @@ void World::ResetDailyQuests()
         if (itr->second->GetPlayer())
             itr->second->GetPlayer()->ResetDailyQuestStatus();
 
-    _nextDailyQuestReset = Seconds(Acore::Time::GetNextTimeWithDayAndHour(-1, 6));
+    if (IsCalendarDay())
+        _nextDailyQuestReset = Seconds(Acore::Time::GetNextTimeWithDayAndHour(-1, 6));
+    else
+        _nextDailyQuestReset = NextWorldDayReset(_nextDailyQuestReset, WorldDay::DailyDays);
+
     sWorldState->setWorldState(WORLD_STATE_CUSTOM_DAILY_QUEST_RESET_TIME, _nextDailyQuestReset.count());
+    LogWorldDayReset("daily quest", _nextDailyQuestReset);
 
     // change available dailies
     sPoolMgr->ChangeDailyQuests();
@@ -1876,8 +1982,13 @@ void World::ResetWeeklyQuests()
         if (itr->second->GetPlayer())
             itr->second->GetPlayer()->ResetWeeklyQuestStatus();
 
-    _nextWeeklyQuestReset = Seconds(Acore::Time::GetNextTimeWithDayAndHour(4, 6));
+    if (IsCalendarDay())
+        _nextWeeklyQuestReset = Seconds(Acore::Time::GetNextTimeWithDayAndHour(4, 6));
+    else
+        _nextWeeklyQuestReset = NextWorldDayReset(_nextWeeklyQuestReset, WorldDay::WeeklyDays);
+
     sWorldState->setWorldState(WORLD_STATE_CUSTOM_WEEKLY_QUEST_RESET_TIME, _nextWeeklyQuestReset.count());
+    LogWorldDayReset("weekly quest", _nextWeeklyQuestReset);
 
     // change available weeklies
     sPoolMgr->ChangeWeeklyQuests();
@@ -1895,8 +2006,13 @@ void World::ResetMonthlyQuests()
         if (itr->second->GetPlayer())
             itr->second->GetPlayer()->ResetMonthlyQuestStatus();
 
-    _nextMonthlyQuestReset = Seconds(Acore::Time::GetNextTimeWithMonthAndHour(-1, 6));
+    if (IsCalendarDay())
+        _nextMonthlyQuestReset = Seconds(Acore::Time::GetNextTimeWithMonthAndHour(-1, 6));
+    else
+        _nextMonthlyQuestReset = NextWorldDayReset(_nextMonthlyQuestReset, WorldDay::MonthlyDays);
+
     sWorldState->setWorldState(WORLD_STATE_CUSTOM_MONTHLY_QUEST_RESET_TIME, _nextMonthlyQuestReset.count());
+    LogWorldDayReset("monthly quest", _nextMonthlyQuestReset);
 }
 
 void World::ResetEventSeasonalQuests(uint16 event_id)
@@ -1933,16 +2049,28 @@ void World::ResetRandomBG()
         if (itr->second->GetPlayer())
             itr->second->GetPlayer()->SetRandomWinner(false);
 
-    _nextRandomBGReset = Seconds(Acore::Time::GetNextTimeWithDayAndHour(-1, getIntConfig(CONFIG_RANDOM_BG_RESET_HOUR)));
+    if (IsCalendarDay())
+        _nextRandomBGReset = Seconds(Acore::Time::GetNextTimeWithDayAndHour(-1,
+            getIntConfig(CONFIG_RANDOM_BG_RESET_HOUR)));
+    else
+        _nextRandomBGReset = NextWorldDayReset(_nextRandomBGReset, WorldDay::DailyDays);
+
     sWorldState->setWorldState(WORLD_STATE_CUSTOM_BG_DAILY_RESET_TIME, _nextRandomBGReset.count());
+    LogWorldDayReset("random BG", _nextRandomBGReset);
 }
 
 void World::CalendarDeleteOldEvents()
 {
     LOG_INFO("server.worldserver", "Calendar deletion of old events.");
 
-    _nextCalendarOldEventsDeletionTime = Seconds(Acore::Time::GetNextTimeWithDayAndHour(-1, getIntConfig(CONFIG_CALENDAR_DELETE_OLD_EVENTS_HOUR)));
+    if (IsCalendarDay())
+        _nextCalendarOldEventsDeletionTime = Seconds(Acore::Time::GetNextTimeWithDayAndHour(-1,
+            getIntConfig(CONFIG_CALENDAR_DELETE_OLD_EVENTS_HOUR)));
+    else
+        _nextCalendarOldEventsDeletionTime = NextWorldDayReset(_nextCalendarOldEventsDeletionTime, WorldDay::DailyDays);
+
     sWorldState->setWorldState(WORLD_STATE_CUSTOM_DAILY_CALENDAR_DELETION_OLD_EVENTS_TIME, _nextCalendarOldEventsDeletionTime.count());
+    LogWorldDayReset("calendar", _nextCalendarOldEventsDeletionTime);
     sCalendarMgr->DeleteOldEvents();
 }
 
@@ -1950,8 +2078,13 @@ void World::ResetGuildCap()
 {
     LOG_INFO("server.worldserver", "Guild Daily Cap reset.");
 
-    _nextGuildReset = Seconds(Acore::Time::GetNextTimeWithDayAndHour(-1, 6));
+    if (IsCalendarDay())
+        _nextGuildReset = Seconds(Acore::Time::GetNextTimeWithDayAndHour(-1, 6));
+    else
+        _nextGuildReset = NextWorldDayReset(_nextGuildReset, WorldDay::DailyDays);
+
     sWorldState->setWorldState(WORLD_STATE_CUSTOM_GUILD_DAILY_RESET_TIME, _nextGuildReset.count());
+    LogWorldDayReset("guild", _nextGuildReset);
 
     sGuildMgr->ResetTimes();
 }

@@ -1137,6 +1137,26 @@ MaxWhoListReturns = 49
 PreventAFKLogout = 0
 
 #
+#    World.DayHours
+#        Description: Length of a world day in running hours. Periodic resets count world days:
+#                     daily quests, the random battleground and guild dailies and the calendar
+#                     cleanup 1, weekly quests 7, monthly quests 30, arena points
+#                     Arena.AutoDistributeInterval, heroic and raid lockouts the map's period
+#                     (at least one world day). A frozen world that runs a few hours a day uses a
+#                     short world day so these resets keep their pace. Holidays keep the calendar.
+#                     At 24 the calendar schedule is unchanged. At any other value each reset
+#                     follows the previous one by its period, the reset hours
+#                     (Battleground.Random.ResetHour, Calendar.DeleteOldEventsHour,
+#                     Instance.ResetTimeHour) are ignored, a month is 30 world days, and stored
+#                     resets further away than one period are pulled in: heroic and raid lockouts
+#                     at startup only (set the value before the start), the others at startup and
+#                     when a reload changes the value.
+#        Range:       0.05-720
+#        Default:     24 - (Calendar schedule)
+
+World.DayHours = 24
+
+#
 ###################################################################################################
 
 ###################################################################################################

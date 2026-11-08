@@ -46,6 +46,7 @@
 #include "ScriptMgr.h"
 #include "SharedDefines.h"
 #include "World.h"
+#include "WorldDay.h"
 #include "WorldPacket.h"
 #include "WorldState.h"
 #include "WorldStateDefines.h"
@@ -180,13 +181,32 @@ void BattlegroundMgr::Update(uint32 diff)
     {
         if (m_AutoDistributionTimeChecker < diff)
         {
+            // World.DayHours: on a world day other than 24 hours the interval counts world days
+            float const dayHours = sWorld->getFloatConfig(CONFIG_WORLD_DAY_HOURS);
+            int64 const daySeconds = Acore::WorldDay::DaySeconds(dayHours);
+            bool const realDay = Acore::WorldDay::IsRealDay(daySeconds);
+            int64 const period = Acore::WorldDay::PeriodSeconds(daySeconds,
+                sWorld->getIntConfig(CONFIG_ARENA_AUTO_DISTRIBUTE_INTERVAL_DAYS));
+
             if (GameTime::GetGameTime() > m_NextAutoDistributionTime)
             {
                 sArenaTeamMgr->DistributeArenaPoints();
-                m_NextAutoDistributionTime = GameTime::GetGameTime() + Seconds(DAY * sWorld->getIntConfig(CONFIG_ARENA_AUTO_DISTRIBUTE_INTERVAL_DAYS));
+                if (realDay)
+                    m_NextAutoDistributionTime = GameTime::GetGameTime() +
+                        Seconds(DAY * sWorld->getIntConfig(CONFIG_ARENA_AUTO_DISTRIBUTE_INTERVAL_DAYS));
+                else
+                    m_NextAutoDistributionTime = Seconds(Acore::WorldDay::NextAfter(GameTime::GetGameTime().count(),
+                        m_NextAutoDistributionTime.count(), period));
+
                 sWorldState->setWorldState(WORLD_STATE_CUSTOM_ARENA_DISTRIBUTION_TIME, m_NextAutoDistributionTime.count());
+                LOG_INFO("server.worldserver",
+                    "World day: arena points reset fired, next at {} (in {} s, world day {} h)",
+                    m_NextAutoDistributionTime.count(), (m_NextAutoDistributionTime - GameTime::GetGameTime()).count(),
+                    dayHours);
             }
-            m_AutoDistributionTimeChecker = 600000; // 10 minutes check
+
+            // 10 minutes check; a short world day checks ten times per period, at least every 10 seconds
+            m_AutoDistributionTimeChecker = realDay ? 600000 : Acore::WorldDay::CheckIntervalMs(period);
         }
         else
             m_AutoDistributionTimeChecker -= diff;
@@ -578,6 +598,26 @@ void BattlegroundMgr::InitAutomaticArenaPointDistribution()
         m_NextAutoDistributionTime = wstime;
     }
 
+    // A world day other than 24 hours pulls in a time stored under a longer one, and checks at once
+    int64 const daySeconds = Acore::WorldDay::DaySeconds(sWorld->getFloatConfig(CONFIG_WORLD_DAY_HOURS));
+    if (!Acore::WorldDay::IsRealDay(daySeconds))
+    {
+        int64 const period = Acore::WorldDay::PeriodSeconds(daySeconds,
+            sWorld->getIntConfig(CONFIG_ARENA_AUTO_DISTRIBUTE_INTERVAL_DAYS));
+        Seconds const next = Seconds(Acore::WorldDay::ClampNext(curtime.count(), m_NextAutoDistributionTime.count(),
+            period));
+        if (next != m_NextAutoDistributionTime)
+        {
+            m_NextAutoDistributionTime = next;
+            sWorldState->setWorldState(WORLD_STATE_CUSTOM_ARENA_DISTRIBUTION_TIME, next.count());
+        }
+
+        m_AutoDistributionTimeChecker = 0;
+    }
+
+    LOG_INFO("server.worldserver", "World day: arena points next at {} (in {} s, world day {} h)",
+        m_NextAutoDistributionTime.count(), (m_NextAutoDistributionTime - curtime).count(),
+        sWorld->getFloatConfig(CONFIG_WORLD_DAY_HOURS));
     LOG_INFO("server.loading", "Automatic Arena Point Distribution initialized.");
 }
 

@@ -33,6 +33,7 @@
 #include "Timer.h"
 #include "Transport.h"
 #include "World.h"
+#include "WorldDay.h"
 #include "WorldSessionMgr.h"
 
 uint16 InstanceSaveMgr::ResetTimeDelay[] = {3600, 900, 300, 60, 0};
@@ -307,6 +308,12 @@ void InstanceSaveMgr::LoadResetTimes()
 
     // load the global respawn times for raid/heroic instances
     uint32 diff = sWorld->getIntConfig(CONFIG_INSTANCE_RESET_TIME_HOUR) * HOUR;
+
+    // World.DayHours: on a world day other than 24 hours a lockout lasts the map's period in world days, with no
+    // reset hour (Instance.ResetTimeHour is ignored)
+    int64 const daySeconds = Acore::WorldDay::DaySeconds(sWorld->getFloatConfig(CONFIG_WORLD_DAY_HOURS));
+    bool const realDay = Acore::WorldDay::IsRealDay(daySeconds);
+
     QueryResult result = CharacterDatabase.Query("SELECT mapid, difficulty, resettime FROM instance_reset");
     if (result)
     {
@@ -340,18 +347,27 @@ void InstanceSaveMgr::LoadResetTimes()
         if (!mapDiff->resetTime)
             continue;
 
-        // the reset_delay must be at least one day
-        uint32 period = uint32(((mapDiff->resetTime * sWorld->getRate(RATE_INSTANCE_RESET_TIME)) / DAY) * DAY);
-        if (period < DAY)
-            period = DAY;
+        // the reset_delay must be at least one day (one world day)
+        uint32 period = Acore::WorldDay::InstancePeriod(mapDiff->resetTime, sWorld->getRate(RATE_INSTANCE_RESET_TIME),
+            daySeconds);
 
         time_t t = GetResetTimeFor(mapid, difficulty);
         if (!t)
         {
             // initialize the reset time
-            t = today + period + diff;
+            t = realDay ? today + period + diff : Acore::WorldDay::FirstNext(now, period);
             SetResetTimeFor(mapid, difficulty, t);
             CharacterDatabase.DirectExecute("INSERT INTO instance_reset VALUES ('{}', '{}', '{}')", mapid, difficulty, (uint32)t);
+        }
+        else if (!realDay && Acore::WorldDay::ClampNext(now, t, period) != t)
+        {
+            // A reset stored under a longer day (the calendar's, at a lab's first start with a short world day) is
+            // pulled in to one period from now, so a lock does not outlast the world day's period
+            t = Acore::WorldDay::ClampNext(now, t, period);
+            SetResetTimeFor(mapid, difficulty, t);
+            CharacterDatabase.DirectExecute(
+                "UPDATE instance_reset SET resettime = '{}' WHERE mapid = '{}' AND difficulty = '{}'", (uint32)t, mapid,
+                difficulty);
         }
 
         // A reset missed while the server was down is scheduled below as overdue, and the first Update()
@@ -374,6 +390,10 @@ void InstanceSaveMgr::LoadResetTimes()
                 break;
 
         ScheduleReset(t - ResetTimeDelay[type - 1], InstResetEvent(type, mapid, difficulty));
+
+        if (!realDay)
+            LOG_INFO("server.worldserver", "Instance reset: map {} diff {} period {} s, first reset {} (in {} s)",
+                mapid, uint32(difficulty), period, t, t - now);
     }
 }
 
@@ -733,17 +753,30 @@ void InstanceSaveMgr::_ResetOrWarnAll(uint32 mapid, Difficulty difficulty, bool 
             return;
         }
 
-        // calculate the next reset time
+        // calculate the next reset time; a world day other than 24 hours (World.DayHours) has no reset hour and
+        // anchors the next reset on the scheduled one
         uint32 diff = sWorld->getIntConfig(CONFIG_INSTANCE_RESET_TIME_HOUR) * HOUR;
+        int64 const daySeconds = Acore::WorldDay::DaySeconds(sWorld->getFloatConfig(CONFIG_WORLD_DAY_HOURS));
 
-        uint32 period = uint32(((mapDiff->resetTime * sWorld->getRate(RATE_INSTANCE_RESET_TIME)) / DAY) * DAY);
-        if (period < DAY)
-            period = DAY;
+        uint32 period = Acore::WorldDay::InstancePeriod(mapDiff->resetTime, sWorld->getRate(RATE_INSTANCE_RESET_TIME),
+            daySeconds);
 
-        uint32 next_reset = uint32(((resetTime + MINUTE) / DAY * DAY) + period + diff);
+        uint32 next_reset = uint32(Acore::WorldDay::NextInstanceReset(resetTime, period, diff, daySeconds));
         SetResetTimeFor(mapid, difficulty, next_reset);
         SetExtendedResetTimeFor(mapid, difficulty, next_reset + period);
-        ScheduleReset(time_t(next_reset - 3600), InstResetEvent(1, mapid, difficulty));
+        if (Acore::WorldDay::IsRealDay(daySeconds))
+        {
+            ScheduleReset(time_t(next_reset - 3600), InstResetEvent(1, mapid, difficulty));
+        }
+        else
+        {
+            // a short period: start the warnings at the first one still ahead, not with all of them at once
+            uint8 type = Acore::WorldDay::FirstWarningType(now, next_reset, ResetTimeDelay);
+            ScheduleReset(time_t(next_reset) - ResetTimeDelay[type - 1], InstResetEvent(type, mapid, difficulty));
+        }
+
+        LOG_INFO("server.worldserver", "Instance reset: map {} diff {} next {} (in {} s)", mapid, uint32(difficulty),
+            next_reset, time_t(next_reset) - now);
 
         // update it in the DB; only forward, as an overdue reset at startup can queue two updates for the row
         // and async workers may commit them out of order

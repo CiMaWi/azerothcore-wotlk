@@ -17,6 +17,7 @@
 
 #include "Player.h"
 #include "WorldConfig.h"
+#include "WorldDay.h"
 
 void WorldConfig::BuildConfigCache()
 {
@@ -274,6 +275,8 @@ void WorldConfig::BuildConfigCache()
     SetConfigValue<uint32>(CONFIG_INSTANCE_RESET_TIME_HOUR, "Instance.ResetTimeHour", 4);
     SetConfigValue<uint32>(CONFIG_INSTANCE_RESET_TIME_RELATIVE_TIMESTAMP, "Instance.ResetTimeRelativeTimestamp", 1135814400);
     SetConfigValue<uint32>(CONFIG_INSTANCE_UNLOAD_DELAY, "Instance.UnloadDelay", 1800000);
+    SetConfigValue<float>(CONFIG_WORLD_DAY_HOURS, "World.DayHours", 24.0f, ConfigValueCache::Reloadable::Yes,
+        [](float const& value) { return Acore::WorldDay::IsValidDayHours(value); }, ">= 0.05 && <= 720");
 
     SetConfigValue<uint32>(CONFIG_MAX_PRIMARY_TRADE_SKILL, "MaxPrimaryTradeSkill", 2);
     SetConfigValue<uint32>(CONFIG_MIN_PETITION_SIGNS, "MinPetitionSigns", 9, ConfigValueCache::Reloadable::Yes, [](uint32 const& value) { return value <= 9; }, "<= 9");
