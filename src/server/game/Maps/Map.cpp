@@ -1133,10 +1133,13 @@ void Map::MoveAllDynamicObjectsInMoveList()
 
 bool Map::UnloadGrid(MapGridType& grid)
 {
-    _mapGridManager.UnloadGrid(grid.GetX(), grid.GetY());
+    // UnloadGrid frees the grid: keep its coordinates for the log line
+    uint16 const x = grid.GetX();
+    uint16 const y = grid.GetY();
+    _mapGridManager.UnloadGrid(x, y);
 
     ASSERT(i_objectsToRemove.empty());
-    LOG_DEBUG("maps", "Unloading grid[{}, {}] for map {} finished", grid.GetX(), grid.GetY(), GetId());
+    LOG_DEBUG("maps", "Unloading grid[{}, {}] for map {} finished", x, y, GetId());
     return true;
 }
 
