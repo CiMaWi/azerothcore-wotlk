@@ -123,6 +123,9 @@ mmapsConfig:
     #
     # All parameters defined globally are eligible for override.
     # Just specify the parameter name and new value in the override section.
+    # Tiles below used to fail with "Too many vertices" (a Detour tile holds at most 65535): a slightly looser
+    # simplification (0.8 -> 1.0, one tile 1.2) fits them. Tile keys are "tileY,tileX", the order of the .mmtile
+    # file name (MMMYYXX) and the reverse of the generator's --tile X,Y (Config::GetConfigForTile).
     mapsOverrides:
       "48": # Blackfathom Deeps
         cellSizeVertical: 0.5334 # ch*2 = 0.2667 * 2 ≈ 0.5334. Reduce the chance to have underground levels.
@@ -136,8 +139,92 @@ mmapsConfig:
 
       "530": # Outland
         tilesOverrides:
+          "24,21": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "24,22": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "25,19": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "25,20": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "25,21": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "25,22": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "26,19": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "26,20": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "27,19": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "27,20": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "27,21": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "28,21": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "28,22": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "29,18": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "29,19": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "29,20": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.2
+          "29,21": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "30,19": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "30,20": # Zangarmarsh / Blade's Edge Mountains
+            maxSimplificationError: 1.0
+          "35,21": # Shattrath
+            maxSimplificationError: 1.0
           "32,30": # Dark portal
             walkableSlopeAngle: 45 # https://github.com/chromiecraft/chromiecraft/issues/8404#issuecomment-3476012660
+
+      "0":
+        tilesOverrides:
+          "52,35": # Deadwind Pass, Karazhan
+            maxSimplificationError: 1.0
+
+      "509":
+        tilesOverrides:
+          "49,29": # Ruins of Ahn'Qiraj
+            maxSimplificationError: 1.0
+
+      "532":
+        tilesOverrides:
+          "52,35": # Karazhan
+            maxSimplificationError: 1.0
+          "52,36": # Karazhan
+            maxSimplificationError: 1.0
+
+      "533":
+        tilesOverrides:
+          "26,38": # Naxxramas
+            maxSimplificationError: 1.0
+
+      "562":
+        tilesOverrides:
+          "20,31": # Blade's Edge Arena
+            maxSimplificationError: 1.0
+
+      "571":
+        tilesOverrides:
+          "16,34": # Storm Peaks
+            maxSimplificationError: 1.0
+          "16,35": # Storm Peaks
+            maxSimplificationError: 1.0
+          "17,34": # Storm Peaks
+            maxSimplificationError: 1.0
+          "21,28": # Dalaran
+            maxSimplificationError: 1.0
+          "21,30": # Dalaran
+            maxSimplificationError: 1.0
+          "21,37": # Zul'Drak, Amphitheater of Anguish
+            maxSimplificationError: 1.0
+          "29,21": # Borean Tundra coast
+            maxSimplificationError: 1.0
 
   # debugOutput generates debug files in the `meshes` directory for use with RecastDemo.
   # This is useful for inspecting and debugging mmap generation visually.
