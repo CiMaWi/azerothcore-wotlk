@@ -280,6 +280,9 @@ void PathGenerator::BuildPolyPath(G3D::Vector3 const& startPos, G3D::Vector3 con
 
         bool canSwim = creature ? creature->CanSwim() : true;
         bool path = creature ? creature->CanFly() : true;
+        // a headless player has no client to correct a straight line through terrain; raycasts only probe collision
+        if (IsHeadlessSource() && !_useRaycast)
+            path = _source->ToPlayer()->CanFly();
         bool waterPath = IsWaterPath(_pathPoints);
         if (path || (waterPath && canSwim))
         {
@@ -653,7 +656,7 @@ void PathGenerator::BuildPointPath(float const* startPoint, float const* endPoin
     }
 
     // Special case with start and end positions very close to each other
-    if (_polyLength == 1 && pointCount == 1 && !(dtResult & DT_SLOPE_TOO_STEEP))
+    if (_polyLength == 1 && pointCount == 1 && (_type & PATHFIND_NORMAL) && !(dtResult & DT_SLOPE_TOO_STEEP))
     {
         // First point is start position, append end position
         dtVcopy(&pathPoints[1 * VERTEX_SIZE], endPoint);
@@ -748,49 +751,59 @@ void PathGenerator::BuildShortcut()
     _type = PATHFIND_SHORTCUT;
 }
 
+namespace
+{
+    // headless players have no client to pull them out of lava, slime or fatigue water
+    constexpr uint16 HEADLESS_EXCLUDE_FLAGS = NAV_MAGMA | NAV_SLIME | NAV_DEEP_WATER;
+    // cost of excluded terrain a headless player is already in, so the path leaves it the short way
+    constexpr float HEADLESS_STUCK_TERRAIN_COST = 40.0f;
+}
+
+bool PathGenerator::IsHeadlessSource() const
+{
+    Player const* player = _source->ToPlayer();
+    return player && player->GetSession() && player->GetSession()->IsHeadless();
+}
+
 void PathGenerator::CreateFilter()
 {
     uint16 includeFlags = 0;
     uint16 excludeFlags = 0;
-    bool isHeadless = false;
+
+    bool const headless = IsHeadlessSource();
 
     if (_source->IsCreature())
     {
         Creature* creature = (Creature*)_source;
         if (creature->CanWalk())
-            includeFlags |= (NAV_GROUND | NAV_GROUND_STEEP);
+            includeFlags |= (NAV_GROUND | NAV_GROUND_STEEP); // walk
 
         // creatures don't take environmental damage
         if (creature->CanEnterWater())
-            includeFlags |= (NAV_WATER | NAV_MAGMA);
+            includeFlags |= (NAV_WATER | NAV_DEEP_WATER | NAV_MAGMA);
+    }
+    else if (headless)
+    {
+        // Headless players have no client to steer them: keep them out of lava, slime and fatigue water, and
+        // let steep ground and water cost more so they take roads and shores when a reasonable detour exists.
+        includeFlags |= (NAV_GROUND | NAV_GROUND_STEEP | NAV_WATER);
+        excludeFlags |= HEADLESS_EXCLUDE_FLAGS;
     }
     else // assume Player
     {
-        // Bots navigate with a stricter filter: include ground + water but exclude lava/slime and
-        // NAV_GROUND_STEEP (the 50-60deg slopes the extractor tags via modAlmostUnwalkableTriangles), so
-        // they keep off steep mountainsides and follow gentle ground/roads. Real players are unchanged and
-        // may still path across steep terrain.
-        Player const* player = _source->ToPlayer();
-        if (player && player->GetSession() && player->GetSession()->IsHeadless())
-        {
-            includeFlags |= (NAV_GROUND | NAV_WATER);
-            excludeFlags |= (NAV_MAGMA | NAV_SLIME | NAV_GROUND_STEEP);
-            isHeadless = true;
-        }
-        else
-        {
-            // perfect support not possible, just stay 'safe'
-            includeFlags |= (NAV_GROUND | NAV_GROUND_STEEP | NAV_WATER | NAV_MAGMA);
-        }
+        // perfect support not possible, just stay 'safe'
+        includeFlags |= (NAV_GROUND | NAV_GROUND_STEEP | NAV_WATER | NAV_DEEP_WATER | NAV_MAGMA);
     }
 
     _filter.setIncludeFlags(includeFlags);
     _filter.setExcludeFlags(excludeFlags);
 
-    // Bots bias their routes away from deep water (swim only when necessary). poly.area == poly.flags ==
-    // NavTerrain, so NAV_WATER doubles as the water area index. Real players and creatures assign no cost.
-    if (isHeadless)
+    // Area ids equal the NavTerrain flags (the generator copies areas into poly flags).
+    if (headless)
+    {
+        _filter.setAreaCost(NAV_GROUND_STEEP, 40.0f);
         _filter.setAreaCost(NAV_WATER, 5.0f);
+    }
 
     UpdateFilter();
 }
@@ -801,39 +814,58 @@ void PathGenerator::UpdateFilter()
     // forcefully into terrain they can't normally move in
     if (Unit const* _sourceUnit = _source->ToUnit())
     {
-        if (_sourceUnit->IsInWater() || _sourceUnit->IsUnderWater())
-        {
-            uint16 includedFlags = _filter.getIncludeFlags();
-            includedFlags |= GetNavTerrain(_source->GetPositionX(),
-                _source->GetPositionY(),
-                _source->GetPositionZ());
+        // headless exclusions come back on every path, so a lifted one ends with the escape
+        bool const headless = IsHeadlessSource();
+        uint16 excludeFlags = _filter.getExcludeFlags();
+        if (headless)
+            excludeFlags |= HEADLESS_EXCLUDE_FLAGS;
 
-            _filter.setIncludeFlags(includedFlags);
+        // a headless player's IsInWater() stays false (it sends no movement packets), so read the server's liquid state
+        LiquidData const& liquidData = _sourceUnit->GetLiquidData();
+        bool const inLiquid = headless
+            ? (liquidData.Status & MAP_LIQUID_STATUS_IN_CONTACT) != 0
+            : _sourceUnit->IsInWater() || _sourceUnit->IsUnderWater();
+
+        if (inLiquid)
+        {
+            NavTerrain const terrain = headless ? GetNavTerrain(liquidData)
+                : GetNavTerrain(_source->GetPositionX(), _source->GetPositionY(), _source->GetPositionZ());
+
+            _filter.setIncludeFlags(_filter.getIncludeFlags() | terrain);
+
+            // the exclude mask wins over the include mask, so lift it for the terrain the headless player is in
+            if (headless && (excludeFlags & terrain))
+            {
+                excludeFlags &= ~terrain;
+                _filter.setAreaCost(terrain, HEADLESS_STUCK_TERRAIN_COST);
+            }
         }
 
-        /*if (Creature const* _sourceCreature = _source->ToCreature())
-            if (_sourceCreature->IsInCombat() || _sourceCreature->IsInEvadeMode())
-                _filter.setIncludeFlags(_filter.getIncludeFlags() | NAV_GROUND_STEEP);*/
+        _filter.setExcludeFlags(excludeFlags);
     }
 }
 
 NavTerrain PathGenerator::GetNavTerrain(float x, float y, float z) const
 {
-    LiquidData const& liquidData = _source->GetMap()->GetLiquidData(_source->GetPhaseMask(), x, y, z, _source->GetCollisionHeight(), {});
+    return GetNavTerrain(_source->GetMap()->GetLiquidData(_source->GetPhaseMask(), x, y, z,
+        _source->GetCollisionHeight(), {}));
+}
+
+NavTerrain PathGenerator::GetNavTerrain(LiquidData const& liquidData)
+{
     if (liquidData.Status == LIQUID_MAP_NO_WATER)
         return NAV_GROUND;
 
-    switch (liquidData.Flags)
-    {
-        case MAP_LIQUID_TYPE_WATER:
-        case MAP_LIQUID_TYPE_OCEAN:
-            return NAV_WATER;
-        case MAP_LIQUID_TYPE_MAGMA:
-        case MAP_LIQUID_TYPE_SLIME:
-            return NAV_MAGMA;
-        default:
-            return NAV_GROUND;
-    }
+    // Flags is a mask: dark water comes ORed onto the liquid type
+    if (liquidData.Flags & MAP_LIQUID_TYPE_MAGMA)
+        return NAV_MAGMA;
+    if (liquidData.Flags & MAP_LIQUID_TYPE_SLIME)
+        return NAV_SLIME;
+    if (liquidData.Flags & MAP_LIQUID_TYPE_DARK_WATER)
+        return NAV_DEEP_WATER;
+    if (liquidData.Flags & (MAP_LIQUID_TYPE_WATER | MAP_LIQUID_TYPE_OCEAN))
+        return NAV_WATER;
+    return NAV_GROUND;
 }
 
 bool PathGenerator::HaveTile(G3D::Vector3 const& p) const
@@ -1282,7 +1314,7 @@ bool PathGenerator::IsWaterPath(Movement::PointsArray pathPoints) const
     {
         NavTerrain terrain = GetNavTerrain(pathPoints[i].x, pathPoints[i].y, pathPoints[i].z);
         // One of the points is not in the water
-        if (terrain != NAV_MAGMA && terrain != NAV_WATER)
+        if (terrain == NAV_GROUND)
         {
             waterPath = false;
             break;
