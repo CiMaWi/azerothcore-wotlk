@@ -238,6 +238,11 @@ void TimedFleeingMovementGenerator::Finalize(Unit* owner)
     owner->RemoveUnitFlag(UNIT_FLAG_FLEEING);
     owner->ClearUnitState(UNIT_STATE_FLEEING | UNIT_STATE_FLEEING_MOVE);
 
+    // The unit is being removed (grid unload, shutdown): Unit::CleanupBeforeRemoveFromMap has cleared its auras and
+    // set m_cleanupDone, so an attack or an evade here would re-add addon auras and assert in Unit::_AddAura
+    if (!owner->IsInWorld())
+        return;
+
     if (Unit* victim = owner->GetVictim())
     {
         if (owner->IsAlive())
