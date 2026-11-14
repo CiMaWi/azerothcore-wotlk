@@ -16,6 +16,7 @@
  */
 
 #include "MapMgr.h"
+#include "LightweightPerf.h"
 #include "Chat.h"
 #include "DatabaseEnv.h"
 #include "GridDefines.h"
@@ -339,12 +340,21 @@ void MapMgr::Update(uint32 diff)
         if (m_updater.activated())
             m_updater.schedule_update(*map, uint32(full ? i_timer[mapUpdateStep].GetCurrent() : 0), diff);
         else
-            map->Update(uint32(full ? i_timer[mapUpdateStep].GetCurrent() : 0), diff);
+        {
+            // Inline instance children share this task; their sections retain per-map update counts.
+            uint32 const mapDiff = uint32(full ? i_timer[mapUpdateStep].GetCurrent() : 0);
+            LightweightPerf::MapScope perf(map->GetId(), mapDiff != 0);
+            map->Update(mapDiff, diff);
+        }
     }
 
-    if (m_updater.activated())
-        m_updater.wait();
+    {
+        LightweightPerf::WorldPhaseScope perf(LightweightPerf::MapsWait);
+        if (m_updater.activated())
+            m_updater.wait();
+    }
 
+    LightweightPerf::WorldPhaseScope delayedPerf(LightweightPerf::MapsDelayed);
     if (mapUpdateStep < 3)
     {
         for (MapMapType::iterator iter = i_maps.begin(); iter != i_maps.end(); ++iter)

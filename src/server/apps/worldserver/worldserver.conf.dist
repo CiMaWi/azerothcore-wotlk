@@ -835,6 +835,10 @@ Log.Async.Enable = 0
 
 Metric.Enable = 0
 
+# Bounded aggregate world/map/AI timings, independent of the full metrics stream.
+# Read and clear with the console command: playerbots tickperf reset|take
+Performance.Lightweight = 0
+
 #
 #    Metric.InfluxDB
 #        Description:     Connection settings for InfluxDB.

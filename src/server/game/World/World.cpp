@@ -64,6 +64,7 @@
 #include "M2Stores.h"
 #include "MailMgr.h"
 #include "MapMgr.h"
+#include "LightweightPerf.h"
 #include "Metric.h"
 #include "MotdMgr.h"
 #include "ObjectMgr.h"
@@ -236,6 +237,8 @@ void World::LoadConfigSettings(bool reload)
     sLog->SetRealmId(realm.Id.Realm);
 
     sScriptMgr->OnBeforeConfigLoad(reload);
+
+    LightweightPerf::Configure(sConfigMgr->GetOption<bool>("Performance.Lightweight", false));
 
     // load update time related configs
     sWorldUpdateTime.LoadFromConfig();
@@ -1202,6 +1205,7 @@ void World::DetectDBCLang()
 /// Update the World !
 void World::Update(uint32 diff)
 {
+    LightweightPerf::WorldScope lightweightPerf;
     METRIC_TIMER("world_update_time_total");
 
     ///- Update the game time and check for shutdown time
@@ -1296,6 +1300,7 @@ void World::Update(uint32 diff)
 
     {
         METRIC_TIMER("world_update_time", METRIC_TAG("type", "Update sessions"));
+        LightweightPerf::WorldPhaseScope perf(LightweightPerf::Sessions);
         sWorldSessionMgr->UpdateSessions(diff);
     }
 
@@ -1323,6 +1328,7 @@ void World::Update(uint32 diff)
     {
         ///- Update objects when the timer has passed (maps, transport, creatures, ...)
         METRIC_TIMER("world_update_time", METRIC_TAG("type", "Update maps"));
+        LightweightPerf::WorldPhaseScope perf(LightweightPerf::Maps);
         sMapMgr->Update(diff);
     }
 
@@ -1424,6 +1430,7 @@ void World::Update(uint32 diff)
 
     {
         METRIC_TIMER("world_update_time", METRIC_TAG("type", "Update world scripts"));
+        LightweightPerf::WorldPhaseScope perf(LightweightPerf::Scripts);
         sScriptMgr->OnWorldUpdate(diff);
     }
 

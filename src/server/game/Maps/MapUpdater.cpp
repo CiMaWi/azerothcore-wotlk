@@ -22,6 +22,7 @@
 #include "Map.h"
 #include "MapMgr.h"
 #include "Metric.h"
+#include "LightweightPerf.h"
 
 class UpdateRequest
 {
@@ -36,14 +37,19 @@ class MapUpdateRequest : public UpdateRequest
 {
 public:
     MapUpdateRequest(Map& m, MapUpdater& u, uint32 d, uint32 sd)
-        : m_map(m), m_updater(u), m_diff(d), s_diff(sd)
+        : m_map(m), m_updater(u), m_diff(d), s_diff(sd), m_queuedAt(LightweightPerf::QueuedAt())
     {
     }
 
     void call() override
     {
         METRIC_TIMER("map_update_time_diff", METRIC_TAG("map_id", std::to_string(m_map.GetId())));
-        m_map.Update(m_diff, s_diff);
+        {
+            // Include derived updates and merge before the completion signal releases the world thread.
+            LightweightPerf::SetMapQueuedAt(m_queuedAt);
+            LightweightPerf::MapScope perf(m_map.GetId(), m_diff != 0);
+            m_map.Update(m_diff, s_diff);
+        }
         m_updater.update_finished();
     }
 
@@ -52,6 +58,7 @@ private:
     MapUpdater& m_updater;
     uint32 m_diff;
     uint32 s_diff;
+    uint64 m_queuedAt;
 };
 
 class MapPreloadRequest : public UpdateRequest
