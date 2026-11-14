@@ -31,6 +31,7 @@
 #include "MapGrid.h"
 #include "MapInstanced.h"
 #include "MapSectionStats.h"
+#include "LightweightPerf.h"
 #include "Metric.h"
 #include "MiscPackets.h"
 #include "Object.h"
@@ -456,6 +457,8 @@ static_assert(MAP_SECTION_DELAYED_VISIBILITY == 9 && MAP_SECTION_REST == 10,
 static void SendMapSectionStats(uint32 mapId, uint32 players, bool full)
 {
     MapSectionStats& stats = mapSectionStats;
+    static_assert(MAX_MAP_SECTIONS == LightweightPerf::MapSectionCount);
+    LightweightPerf::RecordMapSections(stats.sectionNs, full, players, stats.playerUpdates);
     if (!stats.on)
         return;
 
@@ -486,13 +489,13 @@ static void SendMapSectionStats(uint32 mapId, uint32 players, bool full)
 
 void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
 {
-    // Section timing and counters (MapSectionStats.h): armed only with metrics on and players on the map
     uint32 const players = m_mapRefMgr.getSize();
-    bool const timed = players && sMetric->IsEnabled();
+    bool const metrics = players && sMetric->IsEnabled();
+    bool const timed = metrics || LightweightPerf::Enabled();
     if (timed)
         mapSectionStats = MapSectionStats();
 
-    mapSectionStats.on = timed;
+    mapSectionStats.on = metrics;
     MapSectionClock clock(timed);
 
     if (t_diff)
