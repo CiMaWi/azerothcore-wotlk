@@ -435,20 +435,17 @@ void Map::UpdatePlayerZoneStats(uint32 oldZone, uint32 newZone)
         ++_zonePlayerCountMap[newZone];
 }
 
-// Names of the map_section_us sections in MapUpdateSection order, and whether a short tick (t_diff == 0) runs them.
-// Both tables are positional: a new MapUpdateSection entry needs a name and a short-tick flag at the same index.
+// Names of the map_section_us sections in MapUpdateSection order; LightweightPerf::MapSectionInShortTick says whether
+// a short tick (t_diff == 0) runs them. Both tables are positional: a new MapUpdateSection entry needs a name and a
+// short-tick flag at the same index.
 static constexpr char const* MapSectionNames[] =
 {
     "sessions", "player_update", "events", "respawns", "mark_cells", "non_player_objects", "send_object_updates",
     "scripts", "moves", "delayed_visibility", "rest"
 };
-static constexpr bool MapSectionInShortTick[] =
-{
-    true, true, true, false, false, false, false, false, false, true, false
-};
 static_assert(sizeof(MapSectionNames) / sizeof(MapSectionNames[0]) == MAX_MAP_SECTIONS,
     "MapSectionNames must name every MapUpdateSection");
-static_assert(sizeof(MapSectionInShortTick) / sizeof(MapSectionInShortTick[0]) == MAX_MAP_SECTIONS,
+static_assert(LightweightPerf::MapSectionInShortTick.size() == MAX_MAP_SECTIONS,
     "MapSectionInShortTick must flag every MapUpdateSection");
 static_assert(MAP_SECTION_DELAYED_VISIBILITY == 9 && MAP_SECTION_REST == 10,
     "MapSectionNames and MapSectionInShortTick follow the MapUpdateSection order");
@@ -467,7 +464,7 @@ static void SendMapSectionStats(uint32 mapId, uint32 players, bool full)
     std::string const fullTag = full ? "1" : "0";
     for (uint8 i = 0; i < MAX_MAP_SECTIONS; ++i)
     {
-        if (!full && !MapSectionInShortTick[i])
+        if (!full && !LightweightPerf::MapSectionInShortTick[i])
             continue;
 
         METRIC_VALUE("map_section_us", uint64((stats.sectionNs[i] + 500) / 1000), METRIC_TAG("map_id", id),

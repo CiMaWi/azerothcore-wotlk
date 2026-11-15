@@ -44,21 +44,30 @@ enum WorldPhase : std::size_t
     Other,
     MapsWait,
     MapsDelayed,
+    WorldCpu,
     WorldPhaseCount
 };
 
 constexpr std::size_t MapSectionCount = 11;
+// Whether a short tick (map diff 0) runs each map section, in MapUpdateSection order (Map.cpp checks the order).
+constexpr std::array<bool, MapSectionCount> MapSectionInShortTick = {true,  true,  true,  false, false, false,
+                                                                     false, false, false, true,  false};
+
 enum MapRow : std::size_t
 {
     Task = MapSectionCount,
     Queue,
     Cpu,
     Ai,
+    Pregate,
     Players,
     PlayerUpdates,
     CpuValid,
     CpuInvalid,
     OverflowTasks,
+    // Pair counters (calls = all, total = hits): updates with a non-zero work mask, AI checks with live
+    WorkMaskUpdates,
+    LiveAiChecks,
     MapRowCount
 };
 
@@ -67,6 +76,7 @@ void Configure(bool enabled);
 std::uint64_t QueuedAt();
 void SetMapQueuedAt(std::uint64_t queuedAt);
 void RecordMapSections(std::uint64_t const* sections, bool full, std::uint32_t players, std::uint32_t playerUpdates);
+// World thread only: it reads the world update-time table, whose percentiles sort it without a lock.
 std::string Snapshot(bool reset, bool metricsEnabled);
 
 // One task owns its buffer. Only completion merges into the bounded shared interval.
@@ -99,6 +109,9 @@ public:
     AiScope(AiScope const&) = delete;
     AiScope& operator=(AiScope const&) = delete;
 
+    void MarkPregate();
+    void Count(MapRow row, bool hit);
+
 private:
     MapScope* _task;
     std::uint64_t _start;
@@ -115,8 +128,11 @@ public:
 
 private:
     bool _on;
+    bool _cpuValid = false;
     std::uint64_t _epoch = 0;
     std::uint64_t _start = 0;
+    std::uint64_t _cpuStart = 0;
+    std::uint64_t _tscStart = 0;
     std::array<Row, WorldPhaseCount> _rows;
 };
 

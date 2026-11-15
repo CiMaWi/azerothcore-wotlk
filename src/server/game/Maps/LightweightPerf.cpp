@@ -24,6 +24,8 @@
 #include <mutex>
 #include <sstream>
 
+#include "UpdateTime.h"
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -31,6 +33,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <intrin.h>
 #include <windows.h>
 #else
 #include <ctime>
@@ -93,7 +96,33 @@ bool ThreadCpu(std::uint64_t& nanoseconds)
 #endif
 }
 
-constexpr char const* WorldNames[] = {"update", "sessions", "maps", "scripts", "other", "maps_wait", "maps_delayed"};
+// The world row's clock: Windows counts the thread's TSC cycles (GetThreadTimes is quantised to the scheduler tick),
+// scaled to nanoseconds by the TSC rate over the same scope; elsewhere the thread clock in nanoseconds.
+bool PreciseCpu(std::uint64_t& value)
+{
+#ifdef _WIN32
+    ULONG64 cycles = 0;
+    if (!QueryThreadCycleTime(GetCurrentThread(), &cycles))
+        return false;
+
+    value = cycles;
+    return true;
+#else
+    return ThreadCpu(value);
+#endif
+}
+
+std::uint64_t Tsc()
+{
+#ifdef _WIN32
+    return __rdtsc();
+#else
+    return 0;
+#endif
+}
+
+constexpr char const* WorldNames[] = {"update", "sessions",  "maps",         "scripts",
+                                      "other",  "maps_wait", "maps_delayed", "cpu"};
 constexpr char const* MapNames[] = {"sessions",
                                     "player_update",
                                     "events",
@@ -109,17 +138,21 @@ constexpr char const* MapNames[] = {"sessions",
                                     "queue",
                                     "cpu",
                                     "ai",
+                                    "pregate",
                                     "count_players",
                                     "count_player_updates",
                                     "count_cpu_valid",
                                     "count_cpu_invalid",
-                                    "count_overflow_tasks"};
+                                    "count_overflow_tasks",
+                                    "count_work_mask_updates",
+                                    "count_live_ai_checks"};
 static_assert(std::size(WorldNames) == WorldPhaseCount);
 static_assert(std::size(MapNames) == MapRowCount);
 
-void WriteRow(std::ostringstream& out, bool& first, std::string const& name, Row const& row, bool counter)
+void WriteRow(std::ostringstream& out, bool& first, std::string const& name, Row const& row, bool counter,
+              bool always = false)
 {
-    if (!row.calls)
+    if (!row.calls && !always)
         return;
 
     if (!first)
@@ -218,7 +251,7 @@ void RecordMapSections(std::uint64_t const* sections, bool full, std::uint32_t p
         return;
 
     for (std::size_t i = 0; i < MapSectionCount; ++i)
-        if (full || i < 3 || i == 9 || i == 10)
+        if (full || MapSectionInShortTick[i])
             activeMap->Add(i, sections[i]);
     activeMap->Add(Players, players);
     activeMap->Add(PlayerUpdates, playerUpdates);
@@ -232,6 +265,18 @@ AiScope::~AiScope()
         _task->Add(Ai, Now() - _start);
 }
 
+void AiScope::MarkPregate()
+{
+    if (_task)
+        _task->Add(Pregate, Now() - _start);
+}
+
+void AiScope::Count(MapRow row, bool hit)
+{
+    if (_task)
+        _task->Add(row, hit ? 1 : 0);
+}
+
 WorldScope::WorldScope() : _on(Enabled())
 {
     if (!_on)
@@ -239,6 +284,8 @@ WorldScope::WorldScope() : _on(Enabled())
 
     _rows = {};
     _epoch = epoch.load(std::memory_order_relaxed);
+    _cpuValid = PreciseCpu(_cpuStart);
+    _tscStart = Tsc();
     _start = Now();
     activeWorld = this;
 }
@@ -249,6 +296,18 @@ WorldScope::~WorldScope()
         return;
 
     std::uint64_t const elapsed = Now() - _start;
+    std::uint64_t const tscEnd = Tsc();
+    std::uint64_t cpuEnd = 0;
+    if (PreciseCpu(cpuEnd) && _cpuValid && cpuEnd >= _cpuStart)
+    {
+#ifdef _WIN32
+        if (tscEnd > _tscStart)
+            _rows[WorldCpu].Add(std::uint64_t(double(cpuEnd - _cpuStart) * elapsed / double(tscEnd - _tscStart)));
+#else
+        (void)tscEnd;
+        _rows[WorldCpu].Add(cpuEnd - _cpuStart);
+#endif
+    }
     _rows[Update].Add(elapsed);
     std::uint64_t const phases = _rows[Sessions].total + _rows[Maps].total + _rows[Scripts].total;
     _rows[Other].Add(elapsed >= phases ? elapsed - phases : 0);
@@ -306,11 +365,26 @@ std::string Snapshot(bool reset, bool metricsEnabled)
             continue;
         std::string const id = m == MaxMaps ? "overflow" : std::to_string(result.maps[m].id);
         for (std::size_t full = 0; full < 2; ++full)
+        {
+            auto const& ticks = result.maps[m].ticks[full];
+            // The pair counters stand beside every ai row, also while nothing feeds them
             for (std::size_t i = 0; i < MapRowCount; ++i)
-                WriteRow(out, first, "map/" + id + (full ? "/full/" : "/short/") + MapNames[i],
-                         result.maps[m].ticks[full][i], i >= Players);
+                WriteRow(out, first, "map/" + id + (full ? "/full/" : "/short/") + MapNames[i], ticks[i], i >= Players,
+                         i >= WorkMaskUpdates && ticks[Ai].calls);
+        }
     }
-    out << "]}";
+    out << ']';
+
+    // The world update-time table (last AVG_DIFF_COUNT main-loop intervals, sleep included); a snapshot leaves it alone
+    std::uint32_t const samples = sWorldUpdateTime.GetDatasetSize();
+    out << ",\"tick\":{\"samples\":" << samples;
+    if (samples)
+        out << ",\"p50_ms\":" << sWorldUpdateTime.GetPercentile(50)
+            << ",\"p80_ms\":" << sWorldUpdateTime.GetPercentile(80)
+            << ",\"p95_ms\":" << sWorldUpdateTime.GetPercentile(95)
+            << ",\"p99_ms\":" << sWorldUpdateTime.GetPercentile(99)
+            << ",\"max_ms\":" << sWorldUpdateTime.GetPercentile(100);
+    out << "}}";
     return out.str();
 }
 }  // namespace LightweightPerf

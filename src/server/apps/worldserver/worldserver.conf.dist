@@ -835,7 +835,8 @@ Log.Async.Enable = 0
 
 Metric.Enable = 0
 
-# Bounded aggregate world/map/AI timings, independent of the full metrics stream.
+# Bounded aggregate world/map/AI timings (world thread CPU in world/cpu, bot pre-gate time in map/*/pregate),
+# independent of the full metrics stream, plus the update-time table's tick percentiles (the tick object).
 # Read and clear with the console command: playerbots tickperf reset|take
 Performance.Lightweight = 0
 
