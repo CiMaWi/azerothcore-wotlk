@@ -37,9 +37,6 @@
 
 namespace MMAP
 {
-    // a vessel's tile (--vessels): one per display id, beside the map tiles
-    static char const* const VESSEL_TILE_FILE_NAME_FORMAT = "{}/mmaps/vessels/{:05}.mmtile";
-
     static void modAlmostUnwalkableTriangles(float const playerSlopeAngle,
                                              float const* verts, int /*nv*/,
                                              int const* tris, int nt,

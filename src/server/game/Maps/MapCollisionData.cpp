@@ -181,3 +181,18 @@ dtNavMeshQuery const* MMapData::GetNavMeshQuery()
 
     return _navMeshQuery.get();
 }
+
+dtNavMeshQuery const* MMapData::GetVesselNavMeshQuery(uint32 displayId, std::shared_ptr<dtNavMesh const> const& navMesh)
+{
+    if (!navMesh)
+        return nullptr;
+
+    VesselNavMeshQuery& vesselQuery = _vesselNavMeshQueries[displayId];
+    if (!vesselQuery.Query)
+    {
+        vesselQuery.NavMesh = navMesh;
+        vesselQuery.Query = MMAP::MMapMgr::CreateNavMeshQuery(navMesh.get());
+    }
+
+    return vesselQuery.Query.get();
+}

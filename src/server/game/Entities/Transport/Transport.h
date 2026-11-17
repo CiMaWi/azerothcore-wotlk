@@ -23,7 +23,9 @@
 #include "TransportMgr.h"
 #include "VehicleDefines.h"
 #include "ZoneScript.h"
+#include <memory>
 
+class dtNavMesh;
 struct CreatureData;
 
 class Transport : public GameObject, public TransportBase
@@ -43,8 +45,17 @@ public:
     uint32 GetPathProgress() const { return GetGOValue()->Transport.PathProgress; }
     void SetPathProgress(uint32 val) { m_goValue.Transport.PathProgress = val; }
 
+    // The deck's navmesh of this transport's model, in passenger offsets; shared by every transport of the model and
+    // never changed. Empty when the model has no mesh file or the transport is scaled: its passengers then path as
+    // they did before there were vessel meshes.
+    std::shared_ptr<dtNavMesh const> const& GetVesselNavMesh() const { return _vesselNavMesh; }
+
 protected:
+    // asks the store once, where the collision model is created
+    void LoadVesselNavMesh(GameObjectTemplate const* goinfo);
+
     PassengerSet _passengers;
+    std::shared_ptr<dtNavMesh const> _vesselNavMesh;
 };
 
 class MotionTransport : public Transport

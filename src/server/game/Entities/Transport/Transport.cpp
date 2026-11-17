@@ -23,6 +23,7 @@
 #include "DBCStores.h"
 #include "GameObjectAI.h"
 #include "GameTime.h"
+#include "MMapMgr.h"
 #include "MapMgr.h"
 #include "MapReference.h"
 #include "ObjectMgr.h"
@@ -49,6 +50,14 @@ namespace
         std::chrono::system_clock::time_point nextDeparture = transportStartDate + (interval * (intervalsPassed + 1));
         return nextDeparture;
     }
+}
+
+void Transport::LoadVesselNavMesh(GameObjectTemplate const* goinfo)
+{
+    // A mesh point is a passenger offset only on an unscaled model: a transport of another size keeps no mesh and
+    // its passengers path as before.
+    if (goinfo->size == 1.0f)
+        _vesselNavMesh = MMAP::MMapMgr::GetVesselNavMesh(goinfo->displayId);
 }
 
 MotionTransport::MotionTransport() : Transport(), _transportInfo(nullptr), _isMoving(true), _pendingStop(false), _triggeredArrivalEvent(false), _triggeredDepartureEvent(false), _passengersLoaded(false), _delayedTeleport(false),
@@ -132,6 +141,7 @@ bool MotionTransport::CreateMoTrans(ObjectGuid::LowType guidlow, uint32 entry, u
     SetTransportPathRotation(0.0f, 0.0f, 0.0f, 1.0f);
 
     m_model = CreateModel();
+    LoadVesselNavMesh(goinfo);
 
     return true;
 }
@@ -895,6 +905,8 @@ bool StaticTransport::Create(ObjectGuid::LowType guidlow, uint32 name_id, Map* m
 
     if (!m_model)
         m_model = CreateModel();
+
+    LoadVesselNavMesh(goinfo);
 
     SetGoType(GameobjectTypes(goinfo->type));
     SetGoState(go_state);

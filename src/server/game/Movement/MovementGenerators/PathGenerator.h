@@ -100,6 +100,15 @@ class PathGenerator
         // implicitly convert through uint16).
         void SetExcludeFlags(uint16 flags) { _filter.setExcludeFlags(flags); }
 
+        // The search on a vessel's mesh (MMapMgr::GetVesselNavMesh), the only one: vessel mode wraps it with the turn
+        // from the world into the vessel's coordinates and back, a probe calls it with a query of its own. start,
+        // end and points are passenger offsets. What it answers where the world's search would look at the world
+        // or leave the mesh is said at BuildVesselPath. No path leaves points empty. The query is not thread
+        // safe: one per caller's thread.
+        static PathType FindVesselPath(dtNavMesh const* navMesh, dtNavMeshQuery const* navMeshQuery, dtQueryFilterExt const& filter,
+                                       G3D::Vector3 const& start, G3D::Vector3 const& end, Movement::PointsArray& points,
+                                       uint32 pointPathLimit = MAX_POINT_PATH_LENGTH, bool useStraightPath = false, bool useRaycast = false);
+
         // result getters
         [[nodiscard]] G3D::Vector3 const& GetStartPosition() const { return _startPosition; }
         [[nodiscard]] G3D::Vector3 const& GetEndPosition() const { return _endPosition; }
@@ -146,6 +155,10 @@ class PathGenerator
         }
 
     private:
+        // a search on a vessel's mesh: no owner, hence no world to look at (FindVesselPath)
+        PathGenerator(dtNavMesh const* navMesh, dtNavMeshQuery const* navMeshQuery, dtQueryFilterExt const& filter);
+        [[nodiscard]] bool IsVesselSearch() const { return !_source; }
+
         dtPolyRef _pathPolyRefs[MAX_PATH_LENGTH];   // array of detour polygon references
         uint32 _polyLength;                         // number of polygons in the path
 
@@ -162,7 +175,7 @@ class PathGenerator
         G3D::Vector3 _endPosition;          // {x, y, z} of the destination
         G3D::Vector3 _actualEndPosition;    // {x, y, z} of the closest possible point to given destination
 
-        WorldObject const* const _source;       // the object that is moving
+        WorldObject const* const _source;       // the object that is moving; none in a vessel search
         dtNavMesh const* _navMesh;              // the nav mesh
         dtNavMeshQuery const* _navMeshQuery;    // the nav mesh query used to find the path
 
@@ -180,6 +193,9 @@ class PathGenerator
         dtPolyRef GetPathPolyByPosition(dtPolyRef const* polyPath, uint32 polyPathSize, float const* Point, float* Distance = nullptr) const;
         dtPolyRef GetPolyByLocation(float const* Point, float* Distance) const;
         [[nodiscard]] bool HaveTile(G3D::Vector3 const& p) const;
+
+        bool CalculateVesselPath(G3D::Vector3 const& start, G3D::Vector3 const& dest);
+        PathType BuildVesselPath(G3D::Vector3 const& start, G3D::Vector3 const& end, Movement::PointsArray& points);
 
         void BuildPolyPath(G3D::Vector3 const& startPos, G3D::Vector3 const& endPos);
         void BuildPointPath(float const* startPoint, float const* endPoint);

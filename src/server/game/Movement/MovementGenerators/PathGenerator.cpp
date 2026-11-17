@@ -24,6 +24,8 @@
 #include "Map.h"
 #include "Metric.h"
 #include "Player.h"
+#include "Transport.h"
+#include "VesselFrame.h"
 #include "WorldSession.h"
 
 // Blades Edge Arena Ropes normalization
@@ -142,6 +144,15 @@ PathGenerator::PathGenerator(WorldObject const* owner) :
     CreateFilter();
 }
 
+PathGenerator::PathGenerator(dtNavMesh const* navMesh, dtNavMeshQuery const* navMeshQuery, dtQueryFilterExt const& filter) :
+    _polyLength(0), _type(PATHFIND_BLANK), _useStraightPath(false), _forceDestination(false),
+    _slopeCheck(false), _pointPathLimit(MAX_POINT_PATH_LENGTH), _useRaycast(false),
+    _endPosition(G3D::Vector3::zero()), _source(nullptr), _navMesh(navMesh),
+    _navMeshQuery(navMeshQuery), _filter(filter)
+{
+    memset(_pathPolyRefs, 0, sizeof(_pathPolyRefs));
+}
+
 PathGenerator::~PathGenerator()
 {
 }
@@ -169,6 +180,11 @@ bool PathGenerator::CalculatePath(float x, float y, float z, float destX, float 
 
     _forceDestination = forceDest;
 
+    // Vessel mode is decided at each call: a movement generator keeps its path object over many calls, and its unit
+    // boards or leaves between two of them.
+    if (CalculateVesselPath(start, dest))
+        return true;
+
     // make sure navMesh works - we can run on map w/o mmap
     // check if the start and end point have a .mmtile loaded (can we pass via not loaded tile on the way?)
     Unit const* _sourceUnit = _source->ToUnit();
@@ -184,6 +200,220 @@ bool PathGenerator::CalculatePath(float x, float y, float z, float destX, float 
 
     BuildPolyPath(start, dest);
     return true;
+}
+
+// Vessel mode: a unit aboard a transport whose model has a deck mesh gets its path on that mesh, in the vessel's own
+// coordinates, and the answer in world points. Returns false when the call is not one for vessel mode; the world's
+// search then runs as it always did.
+//
+// Rule 1, no mesh: a transport without a mesh (no file, no folder, a size other than 1) takes the world's code path
+// unchanged, straight line included. A unit on a vehicle and a unit on the ground are untouched. A unit on the dock
+// that asks for a point on a deck paths on the world's mesh.
+//
+// Rule 2, deck to dock: an end that is not on the deck (a point on the dock, in the water) is PATHFIND_NOPATH, with
+// no straight line; so is a start off the deck's mesh. The rule is this answer only: what a caller does with it is
+// the caller's (the point generator and MoveSplineInit::MoveTo start a straight two-point move on no path, as for a
+// creature on the ground).
+//
+// None of the world's lookups runs on the vessel's coordinates, where they would read the world at an offset or
+// decide a straight line off the deck: the tile check, the player's shortcut over a hole in the mesh, the water at
+// the ends with the swim, fly and fall shortcut, the ground height of each point (NormalizePath, also in
+// BuildShortcut), the slope check with its water test, and the forced destination. BuildVesselPath says what each
+// case answers instead. UpdateFilter reads the unit's own world position and runs as on the ground.
+//
+// The spline tells "aboard" by the unit's movement flag and transport guid (MoveSplineInit::Launch), this test by
+// the transport pointer. The two can differ while a unit boards or leaves. That is harmless: the points returned are
+// world points, right for both, and the spline turns them into offsets itself when it moves the unit aboard.
+bool PathGenerator::CalculateVesselPath(G3D::Vector3 const& start, G3D::Vector3 const& dest)
+{
+    Unit const* unit = _source->ToUnit();
+    if (!unit || unit->GetVehicle())
+        return false;
+
+    Transport const* transport = unit->GetTransport();
+    if (!transport || transport->FindMap() != unit->FindMap())
+        return false;
+
+    // a unit told to ignore the mesh gets the world's straight line, as before
+    std::shared_ptr<dtNavMesh const> const& navMesh = transport->GetVesselNavMesh();
+    if (!navMesh || unit->HasUnitState(UNIT_STATE_IGNORE_PATHFINDING))
+        return false;
+
+    // a vessel sails from map to map: the query is the one of the map the unit is on now
+    dtNavMeshQuery const* navMeshQuery = unit->GetMap()->GetMapCollisionData().GetMMapData().GetVesselNavMeshQuery(transport->GetDisplayId(), navMesh);
+    if (!navMeshQuery)
+        return false;
+
+    // The vessel's pose at this call turns both ways. A call that starts at the unit takes the unit's own offset,
+    // which is exact; its world position is that offset turned by the pose of the vessel's last move.
+    VesselFrame::Pose const pose{ transport->GetPositionX(), transport->GetPositionY(), transport->GetPositionZ(), transport->GetOrientation() };
+
+    G3D::Vector3 startOffset = start;
+    if (start.x == unit->GetPositionX() && start.y == unit->GetPositionY() && start.z == unit->GetPositionZ())
+        startOffset = G3D::Vector3(unit->GetTransOffsetX(), unit->GetTransOffsetY(), unit->GetTransOffsetZ());
+    else
+        VesselFrame::ToOffset(pose, startOffset.x, startOffset.y, startOffset.z);
+
+    G3D::Vector3 endOffset = dest;
+    VesselFrame::ToOffset(pose, endOffset.x, endOffset.y, endOffset.z);
+
+    UpdateFilter();
+
+    Movement::PointsArray points;
+    PathType const type = FindVesselPath(navMesh.get(), navMeshQuery, _filter, startOffset, endOffset, points, _pointPathLimit, _useStraightPath, _useRaycast);
+
+    // The polygon path kept from earlier calls is one on the world's mesh, and this call ran on another mesh: it is
+    // dropped, so the next call on the world's mesh starts afresh. The vessel search keeps none.
+    Clear();
+
+    if ((type & PATHFIND_NOPATH) || points.size() < 2)
+    {
+        // As on the ground, no path still carries the two ends, since callers read GetPath() before the type. It is
+        // an answer, not a line to walk: the type says no path.
+        _pathPoints.resize(2);
+        _pathPoints[0] = start;
+        _pathPoints[1] = dest;
+        _type = PATHFIND_NOPATH;
+        return true;
+    }
+
+    _pathPoints.resize(points.size());
+    for (std::size_t i = 0; i < points.size(); ++i)
+    {
+        G3D::Vector3 point = points[i];
+        VesselFrame::ToWorld(pose, point.x, point.y, point.z);
+        _pathPoints[i] = point;
+    }
+
+    SetActualEndPosition(_pathPoints.back());
+    _type = type;
+    return true;
+}
+
+PathType PathGenerator::FindVesselPath(dtNavMesh const* navMesh, dtNavMeshQuery const* navMeshQuery, dtQueryFilterExt const& filter,
+    G3D::Vector3 const& start, G3D::Vector3 const& end, Movement::PointsArray& points, uint32 pointPathLimit, bool useStraightPath, bool useRaycast)
+{
+    points.clear();
+    if (!navMesh || !navMeshQuery)
+        return PATHFIND_NOPATH;
+
+    // The search runs in a path object of its own, without an owner: it shares the world's polygon lookup and
+    // smoothing (GetPolyByLocation, FindSmoothPath) and cannot reach a world lookup. The slope check stays off.
+    PathGenerator search(navMesh, navMeshQuery, filter);
+    search._pointPathLimit = std::min<uint32>(pointPathLimit, MAX_POINT_PATH_LENGTH);
+    search._useStraightPath = useStraightPath;
+    search._useRaycast = useRaycast;
+    return search.BuildVesselPath(start, end, points);
+}
+
+// The search on a vessel's mesh, in offsets. Where the world's search (BuildPolyPath, BuildPointPath) looks at the
+// world or draws a straight line, this one answers as follows:
+// - An end is on the deck when the world's two search boxes (3 x 5 x 3 yd, then 3 x 50 x 3 yd) find a deck polygon
+//   and it is no farther than the 7 yd the world calls near. Otherwise there is no path (rule 2), and the same for
+//   the start. The world gives a player or a flyer a straight line over a hole, and a far end an incomplete path
+//   toward the closest polygon or, to a unit that swims, flies or falls, a straight line; none of these exists here,
+//   and neither does a far-from-polygon flag.
+// - An end on the deck but beside its polygon (up to 3 yd, the box: the margin the mesh keeps from a rail, the dock
+//   beside a gangway) is moved onto the polygon: the path ends on the deck and stays PATHFIND_NORMAL, as the world's
+//   does for an end as close to its mesh, without the world's last step off the polygon.
+// - Heights are the deck's as the mesh gives them, since no ground lookup follows (the world's search lifts each
+//   point by half a yard and then drops it onto the ground). The end keeps the height asked for when that is within
+//   the mesh's own step height of the surface: the caller's foot is more exact than the mesh.
+// - A deck can have surfaces no polygon joins (a castle, an envelope's top). An end on another surface than the
+//   start gives PATHFIND_INCOMPLETE and a path to the closest polygon of the start's surface, as in the world.
+// - No slope check: what is walkable aboard is the mesh's decision, and the check's water test asks the world.
+// - No forced destination: the path's end is never replaced by the point asked for, nor the path by a straight line.
+// - A path longer than the length limit is cut at the limit and is PATHFIND_INCOMPLETE | PATHFIND_SHORT, where the
+//   world returns a straight line.
+// - With the ray cast (how far a straight line goes, Map::CheckCollisionAndGetValidCoords) the line runs on the
+//   mesh from a start on the deck toward the end, on the deck or not, and stops where the deck ends: two points,
+//   PATHFIND_NORMAL when it reaches an end on the deck, else PATHFIND_INCOMPLETE.
+PathType PathGenerator::BuildVesselPath(G3D::Vector3 const& start, G3D::Vector3 const& end, Movement::PointsArray& points)
+{
+    float distToStartPoly, distToEndPoly;
+    float startPoint[VERTEX_SIZE] = { start.y, start.z, start.x };
+    float endPoint[VERTEX_SIZE] = { end.y, end.z, end.x };
+
+    dtPolyRef const startPoly = GetPolyByLocation(startPoint, &distToStartPoly);
+    dtPolyRef const endPoly = GetPolyByLocation(endPoint, &distToEndPoly);
+
+    bool const startOnDeck = startPoly != INVALID_POLYREF && distToStartPoly <= 7.0f;
+    bool const endOnDeck = endPoly != INVALID_POLYREF && distToEndPoly <= 7.0f;
+
+    // rule 2
+    if (!startOnDeck || (!endOnDeck && !_useRaycast))
+        return PATHFIND_NOPATH;
+
+    if (endOnDeck)
+    {
+        dtMeshTile const* tile = _navMesh->getTile(0);
+        float const stepHeight = tile && tile->header ? tile->header->walkableClimb : 0.0f;
+
+        float closestPoint[VERTEX_SIZE];
+        bool overPoly = false;
+        if (dtStatusSucceed(_navMeshQuery->closestPointOnPoly(endPoly, endPoint, closestPoint, &overPoly)) &&
+            (!overPoly || std::fabs(endPoint[1] - closestPoint[1]) > stepHeight))
+            dtVcopy(endPoint, closestPoint);
+    }
+
+    if (_useRaycast)
+    {
+        float hit = 0.0f;
+        float hitNormal[VERTEX_SIZE] = { 0.0f, 0.0f, 0.0f };
+
+        dtStatus const rayResult = _navMeshQuery->raycast(startPoly, startPoint, endPoint, &_filter, &hit, hitNormal, _pathPolyRefs, (int*)&_polyLength, MAX_PATH_LENGTH);
+        if (!_polyLength || dtStatusFailed(rayResult))
+            return PATHFIND_NOPATH;
+
+        // raycast() sets hit to FLT_MAX if the ray reaches the end; else walk back a bit from the hit, as the
+        // world's search does, to stay inside the polygon
+        bool const stopped = hit != FLT_MAX;
+        float lastPoint[VERTEX_SIZE];
+        if (stopped)
+            dtVlerp(lastPoint, startPoint, endPoint, hit * 0.99f);
+        else
+            dtVcopy(lastPoint, endPoint);
+
+        dtPolyRef const lastPoly = _pathPolyRefs[_polyLength - 1];
+        if ((stopped || !endOnDeck) && dtStatusFailed(_navMeshQuery->getPolyHeight(lastPoly, lastPoint, &lastPoint[1])))
+            _navMeshQuery->closestPointOnPolyBoundary(lastPoly, lastPoint, lastPoint);
+
+        points.resize(2);
+        points[0] = start;
+        points[1] = G3D::Vector3(lastPoint[2], lastPoint[0], lastPoint[1]);
+        return (stopped || !endOnDeck) ? PATHFIND_INCOMPLETE : PATHFIND_NORMAL;
+    }
+
+    dtStatus const pathResult = _navMeshQuery->findPath(startPoly, endPoly, startPoint, endPoint, &_filter, _pathPolyRefs, (int*)&_polyLength, MAX_PATH_LENGTH);
+    if (!_polyLength || dtStatusFailed(pathResult))
+        return PATHFIND_NOPATH;
+
+    PathType type = _pathPolyRefs[_polyLength - 1] == endPoly ? PATHFIND_NORMAL : PATHFIND_INCOMPLETE;
+
+    float pathPoints[MAX_POINT_PATH_LENGTH * VERTEX_SIZE];
+    uint32 pointCount = 0;
+    dtStatus pointResult = DT_FAILURE;
+    if (_useStraightPath)
+        pointResult = _navMeshQuery->findStraightPath(startPoint, endPoint, _pathPolyRefs, _polyLength, pathPoints, nullptr, nullptr, (int*)&pointCount, _pointPathLimit);
+    else
+        pointResult = FindSmoothPath(startPoint, endPoint, _pathPolyRefs, _polyLength, pathPoints, (int*)&pointCount, _pointPathLimit);
+
+    if (_polyLength == 1 && pointCount == 1)
+    {
+        // start and end very close to each other: the first point is the start, append the end
+        dtVcopy(&pathPoints[1 * VERTEX_SIZE], endPoint);
+        pointCount++;
+    }
+    else if (pointCount < 2 || dtStatusFailed(pointResult))
+        return PATHFIND_NOPATH;
+    else if (pointCount >= _pointPathLimit)
+        type = PathType(PATHFIND_INCOMPLETE | PATHFIND_SHORT);
+
+    points.resize(pointCount);
+    for (uint32 i = 0; i < pointCount; ++i)
+        points[i] = G3D::Vector3(pathPoints[i * VERTEX_SIZE + 2], pathPoints[i * VERTEX_SIZE], pathPoints[i * VERTEX_SIZE + 1]);
+
+    return type;
 }
 
 dtPolyRef PathGenerator::GetPathPolyByPosition(dtPolyRef const* polyPath, uint32 polyPathSize, float const* point, float* distance) const
@@ -1011,10 +1241,17 @@ dtStatus PathGenerator::FindSmoothPath(float const* startPos, float const* endPo
         }
         npolys = FixupCorridor(polys, npolys, MAX_PATH_LENGTH, visited, nvisited);
 
-        if (dtStatusFailed(_navMeshQuery->getPolyHeight(polys[0], result, &result[1])))
-            LOG_DEBUG("maps", "PathGenerator::FindSmoothPath: Cannot find height at position X: {} Y: {} Z: {} for {}",
-                result[2], result[0], result[1], _source->GetGUID().ToString());
-        result[1] += 0.5f;
+        // A vessel search has no owner, and nothing drops its points onto the ground afterwards (NormalizePath asks
+        // the world): a point keeps the deck's height as the mesh gives it.
+        if (IsVesselSearch())
+            _navMeshQuery->getPolyHeight(polys[0], result, &result[1]);
+        else
+        {
+            if (dtStatusFailed(_navMeshQuery->getPolyHeight(polys[0], result, &result[1])))
+                LOG_DEBUG("maps", "PathGenerator::FindSmoothPath: Cannot find height at position X: {} Y: {} Z: {} for {}",
+                    result[2], result[0], result[1], _source->GetGUID().ToString());
+            result[1] += 0.5f;
+        }
         dtVcopy(iterPos, result);
 
         bool canCheckSlope = _slopeCheck && (GetPathType() & ~(PATHFIND_NOT_USING_PATH));
@@ -1069,7 +1306,8 @@ dtStatus PathGenerator::FindSmoothPath(float const* startPos, float const* endPo
                 dtVcopy(iterPos, connectionEndPos);
                 if (dtStatusFailed(_navMeshQuery->getPolyHeight(polys[0], iterPos, &iterPos[1])))
                     return DT_FAILURE;
-                iterPos[1] += 0.5f;
+                if (!IsVesselSearch())
+                    iterPos[1] += 0.5f;
             }
         }
 
