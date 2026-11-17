@@ -37,11 +37,13 @@ static bool buildMeshAdjacency(unsigned short* polys, const int npolys,
 	// Based on code by Eric Lengyel from:
 	// http://www.terathon.com/code/edges.php
 	
+	// Edge indices are 32-bit: a mesh may have more than 0xffff edges (vertices and polygons stay below 0xffff).
+	static const unsigned int NULL_EDGE = 0xffffffff;
 	int maxEdgeCount = npolys*vertsPerPoly;
-	unsigned short* firstEdge = (unsigned short*)rcAlloc(sizeof(unsigned short)*(nverts + maxEdgeCount), RC_ALLOC_TEMP);
+	unsigned int* firstEdge = (unsigned int*)rcAlloc(sizeof(unsigned int)*(nverts + maxEdgeCount), RC_ALLOC_TEMP);
 	if (!firstEdge)
 		return false;
-	unsigned short* nextEdge = firstEdge + nverts;
+	unsigned int* nextEdge = firstEdge + nverts;
 	int edgeCount = 0;
 	
 	rcEdge* edges = (rcEdge*)rcAlloc(sizeof(rcEdge)*maxEdgeCount, RC_ALLOC_TEMP);
@@ -52,7 +54,7 @@ static bool buildMeshAdjacency(unsigned short* polys, const int npolys,
 	}
 	
 	for (int i = 0; i < nverts; i++)
-		firstEdge[i] = RC_MESH_NULL_IDX;
+		firstEdge[i] = NULL_EDGE;
 	
 	for (int i = 0; i < npolys; ++i)
 	{
@@ -73,7 +75,7 @@ static bool buildMeshAdjacency(unsigned short* polys, const int npolys,
 				edge.polyEdge[1] = 0;
 				// Insert edge
 				nextEdge[edgeCount] = firstEdge[v0];
-				firstEdge[v0] = (unsigned short)edgeCount;
+				firstEdge[v0] = (unsigned int)edgeCount;
 				edgeCount++;
 			}
 		}
@@ -89,7 +91,7 @@ static bool buildMeshAdjacency(unsigned short* polys, const int npolys,
 			unsigned short v1 = (j+1 >= vertsPerPoly || t[j+1] == RC_MESH_NULL_IDX) ? t[0] : t[j+1];
 			if (v0 > v1)
 			{
-				for (unsigned short e = firstEdge[v1]; e != RC_MESH_NULL_IDX; e = nextEdge[e])
+				for (unsigned int e = firstEdge[v1]; e != NULL_EDGE; e = nextEdge[e])
 				{
 					rcEdge& edge = edges[e];
 					if (edge.vert[1] == v0 && edge.poly[0] == edge.poly[1])
