@@ -859,6 +859,10 @@ namespace MMAP
 
         rcConfig config = m_mapBuilder->getRecastConfig(cfg, bmin, bmax);
 
+        // a vessel's deck or lift floor is a lone island smaller than the map's minimum region; keep every island
+        if (vesselDisplayId)
+            config.minRegionArea = 0;
+
         // this sets the dimensions of the heightfield - should maybe happen before border padding
         rcCalcGridSize(config.bmin, config.bmax, config.cs, &config.width, &config.height);
 
