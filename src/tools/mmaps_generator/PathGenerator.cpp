@@ -64,6 +64,7 @@ bool handleArgs(int argc, char** argv,
                 std::string& configFilePath,
                 bool& silent,
                 char*& file,
+                char*& vessels,
                 unsigned int& threads)
 {
     bool hasCustomConfigPath = false;
@@ -92,6 +93,13 @@ bool handleArgs(int argc, char** argv,
             if (!param)
                 return false;
             file = param;
+        }
+        else if (strcmp(argv[i], "--vessels") == 0)
+        {
+            param = argv[++i];
+            if (!param)
+                return false;
+            vessels = param;
         }
         else if (strcmp(argv[i], "--tile") == 0)
         {
@@ -132,6 +140,13 @@ bool handleArgs(int argc, char** argv,
         }
     }
 
+    // --vessels builds the models of its list only: no map, tile or mesh file beside it
+    if (vessels && (mapnum >= 0 || tileX >= 0 || tileY >= 0 || file))
+    {
+        printf("--vessels takes no map id, --tile or --file.\n");
+        return false;
+    }
+
     if (!hasCustomConfigPath)
     {
         FILE* f = fopen(configFilePath.c_str(), "r");
@@ -166,9 +181,10 @@ int main(int argc, char** argv)
     int tileX = -1, tileY = -1;
     bool silent = false;
     char* file = nullptr;
+    char* vessels = nullptr;
     std::string configFilePath = "mmaps-config.yaml";
     bool validParam = handleArgs(argc, argv, mapnum,
-                                 tileX, tileY, configFilePath, silent, file, threads);
+                                 tileX, tileY, configFilePath, silent, file, vessels, threads);
 
     if (!validParam)
         return silent ? -1 : finish("You have specified invalid parameters", -1);
@@ -177,7 +193,7 @@ int main(int argc, char** argv)
     if (!config)
         return silent ? -1 : finish("Failed to load configuration. Ensure that 'mmaps-config.yaml' exists in the current directory or specify its path using the --config option.", -1);
 
-    if (mapnum == -1 && config->IsDebugOutputEnabled())
+    if (mapnum == -1 && !vessels && config->IsDebugOutputEnabled())
     {
         if (silent)
             return -2;
@@ -195,7 +211,9 @@ int main(int argc, char** argv)
     MapBuilder builder(&config.value(), mapnum, threads);
 
     uint32 start = getMSTime();
-    if (file)
+    if (vessels)
+        builder.buildVessels(vessels);
+    else if (file)
         builder.buildMeshFromFile(file);
     else if (tileX > -1 && tileY > -1 && mapnum >= 0)
         builder.buildSingleTile(mapnum, tileX, tileY);
