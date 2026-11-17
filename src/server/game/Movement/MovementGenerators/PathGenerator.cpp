@@ -24,6 +24,7 @@
 #include "Map.h"
 #include "Metric.h"
 #include "Player.h"
+#include "Random.h"
 #include "Transport.h"
 #include "VesselFrame.h"
 #include "WorldSession.h"
@@ -306,6 +307,68 @@ PathType PathGenerator::FindVesselPath(dtNavMesh const* navMesh, dtNavMeshQuery 
     return search.BuildVesselPath(start, end, points);
 }
 
+namespace
+{
+    // Detour's random callback for a deck place: numbers in [0, 1)
+    float VesselRandom()
+    {
+        return static_cast<float>(rand_norm());
+    }
+
+    // the deck polygon nearest a point in Detour's order, by the search's two boxes (GetPolyByLocation)
+    dtPolyRef FindVesselPoly(dtNavMeshQuery const* navMeshQuery, dtQueryFilterExt const& filter, float const* point, float* closestPoint)
+    {
+        float const nearExtents[VERTEX_SIZE] = { 3.0f, 5.0f, 3.0f };
+        float const farExtents[VERTEX_SIZE] = { 3.0f, 50.0f, 3.0f };
+
+        dtPolyRef polyRef = INVALID_POLYREF;
+        if (dtStatusSucceed(navMeshQuery->findNearestPoly(point, nearExtents, &filter, &polyRef, closestPoint)) && polyRef != INVALID_POLYREF)
+            return polyRef;
+
+        polyRef = INVALID_POLYREF;
+        if (dtStatusSucceed(navMeshQuery->findNearestPoly(point, farExtents, &filter, &polyRef, closestPoint)) && polyRef != INVALID_POLYREF)
+            return polyRef;
+
+        return INVALID_POLYREF;
+    }
+}
+
+bool PathGenerator::FindVesselNearestPoint(dtNavMeshQuery const* navMeshQuery, dtQueryFilterExt const& filter, G3D::Vector3 const& offset, G3D::Vector3& point)
+{
+    if (!navMeshQuery)
+        return false;
+
+    float const askedPoint[VERTEX_SIZE] = { offset.y, offset.z, offset.x };
+    float closest[VERTEX_SIZE] = { 0.0f, 0.0f, 0.0f };
+    if (FindVesselPoly(navMeshQuery, filter, askedPoint, closest) == INVALID_POLYREF)
+        return false;
+
+    point = G3D::Vector3(closest[2], closest[0], closest[1]);
+    return true;
+}
+
+bool PathGenerator::FindVesselRandomPoint(dtNavMeshQuery const* navMeshQuery, dtQueryFilterExt const& filter, G3D::Vector3 const& offset, float radius,
+    G3D::Vector3& point, float (*random)())
+{
+    if (!navMeshQuery)
+        return false;
+
+    float const centre[VERTEX_SIZE] = { offset.y, offset.z, offset.x };
+    float closest[VERTEX_SIZE] = { 0.0f, 0.0f, 0.0f };
+    dtPolyRef const startRef = FindVesselPoly(navMeshQuery, filter, centre, closest);
+    if (startRef == INVALID_POLYREF)
+        return false;
+
+    dtPolyRef randomRef = INVALID_POLYREF;
+    float randomPoint[VERTEX_SIZE] = { 0.0f, 0.0f, 0.0f };
+    if (dtStatusFailed(navMeshQuery->findRandomPointAroundCircle(startRef, closest, radius, &filter, random ? random : VesselRandom, &randomRef, randomPoint)) ||
+        randomRef == INVALID_POLYREF)
+        return false;
+
+    point = G3D::Vector3(randomPoint[2], randomPoint[0], randomPoint[1]);
+    return true;
+}
+
 // The search on a vessel's mesh, in offsets. Where the world's search (BuildPolyPath, BuildPointPath) looks at the
 // world or draws a straight line, this one answers as follows:
 // - An end is on the deck when the world's two search boxes (3 x 5 x 3 yd, then 3 x 50 x 3 yd) find a deck polygon
@@ -398,9 +461,11 @@ PathType PathGenerator::BuildVesselPath(G3D::Vector3 const& start, G3D::Vector3 
     else
         pointResult = FindSmoothPath(startPoint, endPoint, _pathPolyRefs, _polyLength, pathPoints, (int*)&pointCount, _pointPathLimit);
 
-    if (_polyLength == 1 && pointCount == 1)
+    // Start and end very close to each other: the first point is the start, append the end. The smoothing stops at
+    // the start when every corner and the end lie within its slop; on a deck's small polygons two such ends often
+    // lie on two polygons, where the world's test (a single polygon) would answer no path for a move of a step.
+    if (pointCount == 1 && (_polyLength == 1 || (dtStatusSucceed(pointResult) && dtVdist2D(startPoint, endPoint) <= SMOOTH_PATH_SLOP)))
     {
-        // start and end very close to each other: the first point is the start, append the end
         dtVcopy(&pathPoints[1 * VERTEX_SIZE], endPoint);
         pointCount++;
     }

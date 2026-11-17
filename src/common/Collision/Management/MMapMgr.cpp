@@ -20,6 +20,7 @@
 #include "Errors.h"
 #include "Log.h"
 #include "MapDefines.h"
+#include <algorithm>
 #include <mutex>
 #include <unordered_map>
 
@@ -78,6 +79,20 @@ namespace
             dtFreeNavMesh(mesh);
             dtFree(data);
             return nullptr;
+        }
+
+        // Detour clips every polygon query to the tile's bounds. The generator writes the model's height range there,
+        // and Recast rounds a walkable span up by up to a cell, so a deck polygon can lie above the tile's top (2454,
+        // 7452, 7648) and a query for a point on it misses it. The top is raised to the tile's highest vertex. Only
+        // the top: the bounding volume tree is quantised from the bottom, which stays.
+        if (dtMeshTile const* tile = static_cast<dtNavMesh const*>(mesh)->getTile(0); tile && tile->header)
+        {
+            dtMeshHeader* header = tile->header;
+            for (int i = 0; i < header->vertCount; ++i)
+                header->bmax[1] = std::max(header->bmax[1], tile->verts[i * 3 + 1]);
+
+            for (int i = 0; i < header->detailVertCount; ++i)
+                header->bmax[1] = std::max(header->bmax[1], tile->detailVerts[i * 3 + 1]);
         }
 
         LOG_DEBUG("maps", "MMAP:loadVessel: Loaded vessel mesh {:05}.mmtile", displayId);

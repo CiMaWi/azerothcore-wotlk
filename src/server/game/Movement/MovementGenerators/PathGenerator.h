@@ -109,6 +109,15 @@ class PathGenerator
                                        G3D::Vector3 const& start, G3D::Vector3 const& end, Movement::PointsArray& points,
                                        uint32 pointPathLimit = MAX_POINT_PATH_LENGTH, bool useStraightPath = false, bool useRaycast = false);
 
+        // Deck places on a vessel's mesh, in offsets, with the caller's query: the nearest deck point to an offset,
+        // found by the search's two boxes (3 x 5 x 3 yd, then 3 x 50 x 3 yd); and a random deck point within a
+        // radius of an offset and connected to it (Detour's findRandomPointAroundCircle from the offset's nearest
+        // polygon; random returns numbers in [0, 1), rand_norm when none is given). False when no deck polygon is
+        // near the offset.
+        static bool FindVesselNearestPoint(dtNavMeshQuery const* navMeshQuery, dtQueryFilterExt const& filter, G3D::Vector3 const& offset, G3D::Vector3& point);
+        static bool FindVesselRandomPoint(dtNavMeshQuery const* navMeshQuery, dtQueryFilterExt const& filter, G3D::Vector3 const& offset, float radius,
+                                          G3D::Vector3& point, float (*random)() = nullptr);
+
         // result getters
         [[nodiscard]] G3D::Vector3 const& GetStartPosition() const { return _startPosition; }
         [[nodiscard]] G3D::Vector3 const& GetEndPosition() const { return _endPosition; }
