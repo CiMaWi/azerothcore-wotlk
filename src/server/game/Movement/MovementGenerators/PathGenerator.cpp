@@ -388,6 +388,8 @@ bool PathGenerator::FindVesselRandomPoint(dtNavMeshQuery const* navMeshQuery, dt
 // - No forced destination: the path's end is never replaced by the point asked for, nor the path by a straight line.
 // - A path longer than the length limit is cut at the limit and is PATHFIND_INCOMPLETE | PATHFIND_SHORT, where the
 //   world returns a straight line.
+// - A smoothing that runs out of points (it goes back and forth at a sharp turn) gives the corridor's corners, where
+//   the world answers no path.
 // - With the ray cast (how far a straight line goes, Map::CheckCollisionAndGetValidCoords) the line runs on the
 //   mesh from a start on the deck toward the end, on the deck or not, and stops where the deck ends: two points,
 //   PATHFIND_NORMAL when it reaches an end on the deck, else PATHFIND_INCOMPLETE.
@@ -460,6 +462,17 @@ PathType PathGenerator::BuildVesselPath(G3D::Vector3 const& start, G3D::Vector3 
         pointResult = _navMeshQuery->findStraightPath(startPoint, endPoint, _pathPolyRefs, _polyLength, pathPoints, nullptr, nullptr, (int*)&pointCount, _pointPathLimit);
     else
         pointResult = FindSmoothPath(startPoint, endPoint, _pathPolyRefs, _polyLength, pathPoints, (int*)&pointCount, _pointPathLimit);
+
+    // The smoothing steps 4 yd toward the next corner of the corridor, past the corner when it is near, sliding along
+    // the walls. At a turn onto a deck's narrow stair or gangway that step can end in a polygon the corridor has just
+    // left; the corridor's fix-up turns it round, the next step overshoots again, and the smoothing goes back and
+    // forth until it runs out of points, which it reports as a failure. The world gives no path there; aboard, where
+    // the corridor is whole, the corridor's corners are the path.
+    if (!_useStraightPath && dtStatusFailed(pointResult) && pointCount >= MAX_POINT_PATH_LENGTH)
+    {
+        pointCount = 0;
+        pointResult = _navMeshQuery->findStraightPath(startPoint, endPoint, _pathPolyRefs, _polyLength, pathPoints, nullptr, nullptr, (int*)&pointCount, _pointPathLimit);
+    }
 
     // Start and end very close to each other: the first point is the start, append the end. The smoothing stops at
     // the start when every corner and the end lie within its slop; on a deck's small polygons two such ends often
