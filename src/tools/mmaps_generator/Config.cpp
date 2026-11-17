@@ -87,6 +87,16 @@ namespace MMAP
                 tileOverride = &tileIt->second;
         }
 
+        return ResolveConfig(mapOverride, tileOverride);
+    }
+
+    ResolvedMeshConfig Config::GetGlobalConfig() const
+    {
+        return ResolveConfig(nullptr, nullptr);
+    }
+
+    ResolvedMeshConfig Config::ResolveConfig(MapOverride const* mapOverride, TileOverride const* tileOverride) const
+    {
         // Helper lambdas to resolve values in order: tile -> map -> global
         auto resolveFloat = [&](auto TileField, auto MapField, float GlobalValue) -> float {
             if (tileOverride && TileField(tileOverride)) return *TileField(tileOverride);

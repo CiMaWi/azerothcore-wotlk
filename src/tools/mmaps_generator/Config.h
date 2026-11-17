@@ -65,6 +65,9 @@ namespace MMAP
 
         ResolvedMeshConfig GetConfigForTile(uint32 mapID, uint32 tileX, uint32 tileY) const;
 
+        // The global meshSettings alone, with no map or tile override: a vessel's tile (--vessels).
+        ResolvedMeshConfig GetGlobalConfig() const;
+
         bool ShouldSkipLiquid() const { return _skipLiquid; }
         bool ShouldSkipContinents() const { return _skipContinents; }
         bool ShouldSkipJunkMaps() const { return _skipJunkMaps; }
@@ -146,6 +149,9 @@ namespace MMAP
             // Higher values produce simpler (faster) meshes but can reduce accuracy.
             float maxSimplificationError = 1.8f;
         };
+
+        // Resolves each value in order: tile override, map override, global.
+        ResolvedMeshConfig ResolveConfig(MapOverride const* mapOverride, TileOverride const* tileOverride) const;
 
         GlobalConfig _global;
         std::unordered_map<uint32, MapOverride> _maps;

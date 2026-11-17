@@ -19,6 +19,7 @@
 #include <DetourCommon.h>
 #include <DetourNavMesh.h>
 #include <DetourNavMeshBuilder.h>
+#include <DetourNavMeshQuery.h>
 #include "IntermediateValues.h"
 #include "MapDefines.h"
 #include "MapTree.h"
@@ -26,7 +27,13 @@
 #include "ModelInstance.h"
 #include "PathCommon.h"
 #include "StringFormat.h"
+#include "VMapDefinitions.h"
 #include "VMapMgr2.h"
+#include "WorldModel.h"
+#include <cctype>
+#include <cmath>
+#include <fstream>
+#include <unordered_map>
 
 namespace MMAP
 {
@@ -395,6 +402,212 @@ namespace MMAP
     }
 
     /**************************************************************************/
+    // A vessel (a transport's collision model) gets a navmesh of its own: the model's triangles, untransformed, all as
+    // ground, with the global meshSettings. Recast's (rx, ry, rz) is the model's (y, z, x), so a mesh point read as
+    // (rz, rx, ry) is a point in the model's frame: for a transport of size 1, a passenger offset.
+    void MapBuilder::buildVessels(char const* listFile)
+    {
+        // the list's first column is the display id; its header and '#' lines start with no digit
+        std::vector<uint32> displayIds;
+        std::ifstream list(listFile);
+        if (!list)
+            printf("Cannot read the vessel list %s\n", listFile);
+
+        std::string line;
+        while (std::getline(list, line))
+            if (!line.empty() && std::isdigit(static_cast<unsigned char>(line[0])))
+                displayIds.push_back(static_cast<uint32>(std::stoul(line)));
+
+        // the server's model for a display id (LoadGameObjectModelList): the name and the WMO flag
+        struct VesselModel
+        {
+            std::string name;
+            bool isWmo;
+        };
+
+        std::unordered_map<uint32, VesselModel> models;
+        std::filesystem::path const vmapsPath(m_config->VMapsPath());
+        std::string const modelListPath = (vmapsPath / VMAP::GAMEOBJECT_MODELS).string();
+        if (FILE* modelList = fopen(modelListPath.c_str(), "rb"))
+        {
+            char magic[8];
+            if (fread(magic, 1, 8, modelList) == 8 && !memcmp(magic, VMAP::VMAP_MAGIC, 8))
+            {
+                uint32 displayId, nameLength;
+                uint8 isWmo;
+                char name[500];
+                G3D::Vector3 bounds[2];
+                while (fread(&displayId, sizeof(uint32), 1, modelList) == 1
+                       && fread(&isWmo, sizeof(uint8), 1, modelList) == 1
+                       && fread(&nameLength, sizeof(uint32), 1, modelList) == 1 && nameLength < sizeof(name)
+                       && fread(name, sizeof(char), nameLength, modelList) == nameLength
+                       && fread(bounds, sizeof(G3D::Vector3), 2, modelList) == 2)
+                    models.emplace(displayId, VesselModel{std::string(name, nameLength), isWmo != 0});
+            }
+
+            fclose(modelList);
+        }
+
+        printf("Building %u vessel meshes, %u models in %s\n", uint32(displayIds.size()), uint32(models.size()),
+               modelListPath.c_str());
+        std::filesystem::create_directories(std::filesystem::path(m_config->MMapsPath()) / "vessels");
+
+        TileBuilder tileBuilder = TileBuilder(this, true, false);
+        uint32 built = 0;
+        for (uint32 displayId : displayIds)
+        {
+            auto const it = models.find(displayId);
+            if (it == models.end())
+            {
+                printf("[Vessel %05u]: no row in %s\n", displayId, VMAP::GAMEOBJECT_MODELS);
+                continue;
+            }
+
+            VesselModel const& model = it->second;
+            std::string const modelPath = (vmapsPath / (model.name + ".vmo")).string();
+            WorldModel worldModel;
+            if (!worldModel.readFile(modelPath))
+            {
+                printf("[Vessel %05u]: cannot read %s\n", displayId, modelPath.c_str());
+                continue;
+            }
+
+            // the server loads the model as WMO or M2 by the list's flag (GameObjectModel::initialize); M2 triangles
+            // are reversed as the map build does
+            bool const nameIsM2 = model.name.find(".m2") != std::string::npos
+                                  || model.name.find(".M2") != std::string::npos;
+            if (nameIsM2 == model.isWmo)
+                printf("[Vessel %05u]: %s is flagged %s in %s\n", displayId, model.name.c_str(),
+                       model.isWmo ? "WMO" : "M2", VMAP::GAMEOBJECT_MODELS);
+
+            MeshData meshData;
+            std::vector<GroupModel> groupModels;
+            worldModel.GetGroupModels(groupModels);
+            for (GroupModel& groupModel : groupModels)
+            {
+                std::vector<G3D::Vector3> vertices;
+                std::vector<MeshTriangle> triangles;
+                WmoLiquid* liquid = nullptr;
+                groupModel.GetMeshData(vertices, triangles, liquid);
+
+                int const offset = meshData.solidVerts.size() / 3;
+                TerrainBuilder::copyVertices(vertices, meshData.solidVerts);
+                TerrainBuilder::copyIndices(triangles, meshData.solidTris, offset, !model.isWmo);
+            }
+
+            if (!meshData.solidTris.size())
+            {
+                printf("[Vessel %05u]: %s has no triangles\n", displayId, model.name.c_str());
+                continue;
+            }
+
+            TerrainBuilder::cleanVertices(meshData.solidVerts, meshData.solidTris);
+            float bmin[3], bmax[3];
+            rcCalcBounds(meshData.solidVerts.getCArray(), meshData.solidVerts.size() / 3, bmin, bmax);
+            printf("[Vessel %05u]: %s, %s, %d triangles, bounds (%.2f %.2f %.2f) (%.2f %.2f %.2f)\n", displayId,
+                   model.name.c_str(), model.isWmo ? "WMO" : "M2", int(meshData.solidTris.size() / 3), bmin[2], bmin[0],
+                   bmin[1], bmax[2], bmax[0], bmax[1]);
+
+            // the vessel's own navmesh: one tile at its model's bounds, as Detour's single-tile init makes it
+            dtNavMeshParams navMeshParams;
+            memset(&navMeshParams, 0, sizeof(dtNavMeshParams));
+            rcVcopy(navMeshParams.orig, bmin);
+            navMeshParams.tileWidth = bmax[0] - bmin[0];
+            navMeshParams.tileHeight = bmax[2] - bmin[2];
+            navMeshParams.maxTiles = 1;
+            navMeshParams.maxPolys = 1 << DT_POLY_BITS;
+
+            dtNavMesh* navMesh = dtAllocNavMesh();
+            if (!navMesh || dtStatusFailed(navMesh->init(&navMeshParams)))
+            {
+                printf("[Vessel %05u]: failed creating navmesh\n", displayId);
+                dtFreeNavMesh(navMesh);
+                continue;
+            }
+
+            tileBuilder.buildMoveMapTile(0, 0, 0, meshData, bmin, bmax, navMesh, displayId);
+            dtFreeNavMesh(navMesh);
+
+            if (checkVesselTile(displayId, bmin, bmax))
+                ++built;
+        }
+
+        printf("Built %u of %u vessel meshes\n", built, uint32(displayIds.size()));
+
+        _cancelationToken = true;
+        _queue.Cancel();
+    }
+
+    /**************************************************************************/
+    // Reads a vessel's file back and loads it as the server would: one tile through Detour's single-tile init.
+    bool MapBuilder::checkVesselTile(uint32 displayId, float const* bmin, float const* bmax) const
+    {
+        std::string const fileName = Acore::StringFormat(VESSEL_TILE_FILE_NAME_FORMAT, m_config->DataDirPath(),
+                                                         displayId);
+        FILE* file = fopen(fileName.c_str(), "rb");
+        if (!file)
+        {
+            printf("[Vessel %05u]: no tile written\n", displayId);
+            return false;
+        }
+
+        MmapTileHeader header;
+        unsigned char* data = nullptr;
+        bool const read = fread(&header, sizeof(MmapTileHeader), 1, file) == 1 && header.mmapMagic == MMAP_MAGIC
+                          && header.dtVersion == uint32(DT_NAVMESH_VERSION) && header.mmapVersion == MMAP_VERSION
+                          && (data = static_cast<unsigned char*>(dtAlloc(header.size, DT_ALLOC_PERM)))
+                          && fread(data, header.size, 1, file) == 1;
+        fclose(file);
+        if (!read)
+        {
+            printf("[Vessel %05u]: %s has no valid header or data\n", displayId, fileName.c_str());
+            dtFree(data);
+            return false;
+        }
+
+        dtNavMesh* navMesh = dtAllocNavMesh();
+        if (!navMesh || dtStatusFailed(navMesh->init(data, int(header.size), DT_TILE_FREE_DATA)))
+        {
+            printf("[Vessel %05u]: the tile does not load as a single-tile navmesh\n", displayId);
+            if (navMesh)
+                dtFreeNavMesh(navMesh);
+            else
+                dtFree(data);
+            return false;
+        }
+
+        dtMeshTile const* tile = static_cast<dtNavMesh const*>(navMesh)->getTile(0);
+        int const polygons = tile && tile->header ? tile->header->polyCount : 0;
+
+        // the polygon nearest the bounds' centre, searched across the whole model
+        float center[3], extents[3];
+        for (int i = 0; i < 3; ++i)
+        {
+            center[i] = (bmin[i] + bmax[i]) / 2;
+            extents[i] = (bmax[i] - bmin[i]) / 2 + 1.0f;
+        }
+
+        dtPolyRef polyRef = 0;
+        float nearest[3] = {};
+        dtNavMeshQuery* query = dtAllocNavMeshQuery();
+        dtQueryFilter filter;
+        bool const found = query && dtStatusSucceed(query->init(navMesh, 64))
+                           && dtStatusSucceed(query->findNearestPoly(center, extents, &filter, &polyRef, nearest))
+                           && polyRef;
+        dtFreeNavMeshQuery(query);
+        dtFreeNavMesh(navMesh);
+
+        if (found)
+            printf("[Vessel %05u]: loads as one tile, %d polygons, %u bytes; nearest to the centre (%.2f %.2f %.2f)\n",
+                   displayId, polygons, header.size, nearest[2], nearest[0], nearest[1]);
+        else
+            printf("[Vessel %05u]: loads as one tile, %d polygons, %u bytes; no polygon near the centre\n", displayId,
+                   polygons, header.size);
+
+        return polygons > 0;
+    }
+
+    /**************************************************************************/
     void MapBuilder::buildSingleTile(uint32 mapID, uint32 tileX, uint32 tileY)
     {
         dtNavMesh* navMesh = nullptr;
@@ -612,11 +825,14 @@ namespace MMAP
     /**************************************************************************/
     void TileBuilder::buildMoveMapTile(uint32 mapID, uint32 tileX, uint32 tileY,
                                       MeshData& meshData, float bmin[3], float bmax[3],
-                                      dtNavMesh* navMesh)
+                                      dtNavMesh* navMesh, Optional<uint32> vesselDisplayId)
     {
         // console output
         char tileString[20];
-        sprintf(tileString, "[Map %03i] [%02i,%02i]: ", mapID, tileX, tileY);
+        if (vesselDisplayId)
+            sprintf(tileString, "[Vessel %05u]: ", *vesselDisplayId);
+        else
+            sprintf(tileString, "[Map %03i] [%02i,%02i]: ", mapID, tileX, tileY);
         printf("%s Building movemap tiles...\n", tileString);
 
         IntermediateValues iv;
@@ -632,14 +848,30 @@ namespace MMAP
         int lTriCount = meshData.liquidTris.size() / 3;
         uint8* lTriFlags = meshData.liquidType.getCArray();
 
-        ResolvedMeshConfig cfg = m_mapBuilder->getConfig().GetConfigForTile(mapID, tileX, tileY);
+        // a vessel's model takes the global meshSettings: no map or tile override applies to it
+        ResolvedMeshConfig cfg = vesselDisplayId ? m_mapBuilder->getConfig().GetGlobalConfig()
+                                                 : m_mapBuilder->getConfig().GetConfigForTile(mapID, tileX, tileY);
         int tilesPerMap = cfg.tilesPerMapEdge;
         float baseUnitDim = cfg.baseUnitDim;
 
         rcConfig config = m_mapBuilder->getRecastConfig(cfg, bmin, bmax);
 
+        // a vessel's deck or lift floor is a lone island smaller than the map's minimum region; keep every island
+        if (vesselDisplayId)
+            config.minRegionArea = 0;
+
         // this sets the dimensions of the heightfield - should maybe happen before border padding
         rcCalcGridSize(config.bmin, config.bmax, config.cs, &config.width, &config.height);
+
+        // a map tile is built in tilesPerMap x tilesPerMap sub-tiles, a vessel in as many as its model spans
+        int subTilesX = tilesPerMap;
+        int subTilesY = tilesPerMap;
+        if (vesselDisplayId)
+        {
+            float const subTileSize = config.tileSize * config.cs;
+            subTilesX = std::max(1, int(std::ceil((bmax[0] - bmin[0]) / subTileSize)));
+            subTilesY = std::max(1, int(std::ceil((bmax[2] - bmin[2]) / subTileSize)));
+        }
 
         // Detour links a polygon to another of its tile only below index 0x7fff: it stores the neighbour as
         // index + 1 and reads bit 0x8000 as a border or portal. A merged tile over that many polygons loses links,
@@ -652,7 +884,7 @@ namespace MMAP
         for (int rebuild = 0; rebuild <= maxRebuilds; ++rebuild)
         {
             // allocate subregions : tiles
-            Tile* tiles = new Tile[tilesPerMap * tilesPerMap];
+            Tile* tiles = new Tile[subTilesX * subTilesY];
 
             // Initialize per tile config.
             rcConfig tileCfg = config;
@@ -661,16 +893,16 @@ namespace MMAP
             tileCfg.maxSimplificationError = simplificationError;
 
             // merge per tile poly and detail meshes
-            rcPolyMesh** pmmerge = new rcPolyMesh*[tilesPerMap * tilesPerMap];
-            rcPolyMeshDetail** dmmerge = new rcPolyMeshDetail*[tilesPerMap * tilesPerMap];
+            rcPolyMesh** pmmerge = new rcPolyMesh*[subTilesX * subTilesY];
+            rcPolyMeshDetail** dmmerge = new rcPolyMeshDetail*[subTilesX * subTilesY];
             int nmerge = 0;
 
             // build all tiles
-            for (int y = 0; y < tilesPerMap; ++y)
+            for (int y = 0; y < subTilesY; ++y)
             {
-                for (int x = 0; x < tilesPerMap; ++x)
+                for (int x = 0; x < subTilesX; ++x)
                 {
-                    Tile& tile = tiles[x + y * tilesPerMap];
+                    Tile& tile = tiles[x + y * subTilesX];
 
                     // Calculate the per tile bounding box.
                     tileCfg.bmin[0] = config.bmin[0] + x * float(config.tileSize * config.cs);
@@ -853,8 +1085,17 @@ namespace MMAP
         params.walkableHeight = baseUnitDim * config.walkableHeight;  // agent height
         params.walkableRadius = baseUnitDim * config.walkableRadius;  // agent radius
         params.walkableClimb = baseUnitDim * config.walkableClimb;    // keep less that walkableHeight (aka agent height)!
-        params.tileX = (((bmin[0] + bmax[0]) / 2) - navMesh->getParams()->orig[0]) / GRID_SIZE;
-        params.tileY = (((bmin[2] + bmax[2]) / 2) - navMesh->getParams()->orig[2]) / GRID_SIZE;
+        if (vesselDisplayId)
+        {
+            // a vessel's mesh is one tile at the origin of its own navmesh
+            params.tileX = 0;
+            params.tileY = 0;
+        }
+        else
+        {
+            params.tileX = (((bmin[0] + bmax[0]) / 2) - navMesh->getParams()->orig[0]) / GRID_SIZE;
+            params.tileY = (((bmin[2] + bmax[2]) / 2) - navMesh->getParams()->orig[2]) / GRID_SIZE;
+        }
         rcVcopy(params.bmin, bmin);
         rcVcopy(params.bmax, bmax);
         params.cs = config.cs;
@@ -921,11 +1162,14 @@ namespace MMAP
             }
 
             // file output
-            const std::string fileName = Acore::StringFormat(
-                TILE_FILE_NAME_FORMAT,
-                m_mapBuilder->getConfig().DataDirPath(),
-                mapID, tileY, tileX
-            );
+            const std::string fileName = vesselDisplayId
+                ? Acore::StringFormat(VESSEL_TILE_FILE_NAME_FORMAT, m_mapBuilder->getConfig().DataDirPath(),
+                                      *vesselDisplayId)
+                : Acore::StringFormat(
+                    TILE_FILE_NAME_FORMAT,
+                    m_mapBuilder->getConfig().DataDirPath(),
+                    mapID, tileY, tileX
+                );
 
             FILE* file = fopen(fileName.c_str(), "wb");
             if (!file)
@@ -941,7 +1185,7 @@ namespace MMAP
 
             // write header
             MmapTileHeader header;
-            header.usesLiquids = m_terrainBuilder->usesLiquids();
+            header.usesLiquids = !vesselDisplayId && m_terrainBuilder->usesLiquids();
             header.size = uint32(navDataSize);
             header.recastConfig = cfg.toMMAPTileRecastConfig();
             fwrite(&header, sizeof(MmapTileHeader), 1, file);
@@ -954,7 +1198,7 @@ namespace MMAP
             navMesh->removeTile(tileRef, nullptr, nullptr);
         } while (false);
 
-        if (m_debugOutput)
+        if (m_debugOutput && !vesselDisplayId)
         {
             // restore padding so that the debug visualization is correct
             for (int i = 0; i < iv.polyMesh->nverts; ++i)

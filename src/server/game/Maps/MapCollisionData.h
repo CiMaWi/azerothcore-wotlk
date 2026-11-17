@@ -22,6 +22,7 @@
 #include "MapTree.h"
 #include "MMapMgr.h"
 #include "IVMapMgr.h"
+#include <unordered_map>
 
 class Map;
 
@@ -61,12 +62,24 @@ class MMapData
 public:
     dtNavMesh const* GetNavMesh() const { return _navMesh.get(); }
     dtNavMeshQuery const* GetNavMeshQuery();
+    // The query on a vessel's mesh (MMapMgr::GetVesselNavMesh) for this map, made on the first request. A vessel
+    // sails from map to map, so the query is taken from the map the asking unit is on, at each request.
+    dtNavMeshQuery const* GetVesselNavMeshQuery(uint32 displayId, std::shared_ptr<dtNavMesh const> const& navMesh);
 
 protected:
+    struct VesselNavMeshQuery
+    {
+        // keeps the mesh the query reads alive for as long as the query
+        std::shared_ptr<dtNavMesh const> NavMesh;
+        MMAP::ManagedNavMeshQuery Query;
+    };
+
     // _navMesh is a shared_ptr as it will point to a parent maps nav mesh (if exists) to save on memory
     std::shared_ptr<dtNavMesh> _navMesh;
     // navMeshQuery is not thread safe and needs its own instance per map
     MMAP::ManagedNavMeshQuery _navMeshQuery;
+    // the same holds on a vessel's mesh: one query per map and vessel model (display id)
+    std::unordered_map<uint32, VesselNavMeshQuery> _vesselNavMeshQueries;
 };
 
 // Map collision data holders (dynamic&static vmap, mmaps)

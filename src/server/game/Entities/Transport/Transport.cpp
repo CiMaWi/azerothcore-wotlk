@@ -23,9 +23,11 @@
 #include "DBCStores.h"
 #include "GameObjectAI.h"
 #include "GameTime.h"
+#include "MMapMgr.h"
 #include "MapMgr.h"
 #include "MapReference.h"
 #include "ObjectMgr.h"
+#include "PathGenerator.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "Spell.h"
@@ -49,6 +51,54 @@ namespace
         std::chrono::system_clock::time_point nextDeparture = transportStartDate + (interval * (intervalsPassed + 1));
         return nextDeparture;
     }
+}
+
+void Transport::LoadVesselNavMesh(GameObjectTemplate const* goinfo)
+{
+    // A mesh point is a passenger offset only on an unscaled model: a transport of another size keeps no mesh and
+    // its passengers path as before.
+    if (goinfo->size == 1.0f)
+        _vesselNavMesh = MMAP::MMapMgr::GetVesselNavMesh(goinfo->displayId);
+}
+
+namespace
+{
+    // the bots' polygons, as PathGenerator::CreateFilter gives a headless player
+    dtQueryFilterExt DeckPlaceFilter()
+    {
+        dtQueryFilterExt filter;
+        filter.setIncludeFlags(NAV_GROUND | NAV_WATER);
+        filter.setExcludeFlags(NAV_MAGMA | NAV_SLIME | NAV_GROUND_STEEP);
+        return filter;
+    }
+}
+
+bool Transport::GetNearestDeckPoint(Position const& offset, Position& point) const
+{
+    if (!_vesselNavMesh || !FindMap())
+        return false;
+
+    dtNavMeshQuery const* query = FindMap()->GetMapCollisionData().GetMMapData().GetVesselNavMeshQuery(GetDisplayId(), _vesselNavMesh);
+    G3D::Vector3 found;
+    if (!PathGenerator::FindVesselNearestPoint(query, DeckPlaceFilter(), G3D::Vector3(offset.GetPositionX(), offset.GetPositionY(), offset.GetPositionZ()), found))
+        return false;
+
+    point.Relocate(found.x, found.y, found.z);
+    return true;
+}
+
+bool Transport::GetRandomDeckPoint(Position const& offset, float radius, Position& point) const
+{
+    if (!_vesselNavMesh || !FindMap())
+        return false;
+
+    dtNavMeshQuery const* query = FindMap()->GetMapCollisionData().GetMMapData().GetVesselNavMeshQuery(GetDisplayId(), _vesselNavMesh);
+    G3D::Vector3 found;
+    if (!PathGenerator::FindVesselRandomPoint(query, DeckPlaceFilter(), G3D::Vector3(offset.GetPositionX(), offset.GetPositionY(), offset.GetPositionZ()), radius, found))
+        return false;
+
+    point.Relocate(found.x, found.y, found.z);
+    return true;
 }
 
 MotionTransport::MotionTransport() : Transport(), _transportInfo(nullptr), _isMoving(true), _pendingStop(false), _triggeredArrivalEvent(false), _triggeredDepartureEvent(false), _passengersLoaded(false), _delayedTeleport(false),
@@ -132,6 +182,7 @@ bool MotionTransport::CreateMoTrans(ObjectGuid::LowType guidlow, uint32 entry, u
     SetTransportPathRotation(0.0f, 0.0f, 0.0f, 1.0f);
 
     m_model = CreateModel();
+    LoadVesselNavMesh(goinfo);
 
     return true;
 }
@@ -895,6 +946,8 @@ bool StaticTransport::Create(ObjectGuid::LowType guidlow, uint32 name_id, Map* m
 
     if (!m_model)
         m_model = CreateModel();
+
+    LoadVesselNavMesh(goinfo);
 
     SetGoType(GameobjectTypes(goinfo->type));
     SetGoState(go_state);

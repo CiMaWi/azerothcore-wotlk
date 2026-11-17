@@ -47,6 +47,8 @@ namespace MMAP
 
     static char const* const MAP_FILE_NAME_FORMAT = "{}/mmaps/{:03}.mmap";
     static char const* const TILE_FILE_NAME_FORMAT = "{}/mmaps/{:03}{:02}{:02}.mmtile";
+    // a vessel's tile: one navmesh per collision model (display id), written by mmaps_generator --vessels
+    static char const* const VESSEL_TILE_FILE_NAME_FORMAT = "{}/mmaps/vessels/{:05}.mmtile";
 
     struct NavMeshDeleter
     {
@@ -68,7 +70,14 @@ namespace MMAP
 
         static std::shared_ptr<dtNavMesh> LoadNavMesh(uint32 mapId);
         static bool LoadTile(dtNavMesh* navMesh, uint32 mapId, int32 x, int32 y);
-        static ManagedNavMeshQuery CreateNavMeshQuery(dtNavMesh* navMesh);
+        static ManagedNavMeshQuery CreateNavMeshQuery(dtNavMesh const* navMesh);
+
+        // The deck's navmesh of a vessel (a transport's collision model), in the model's own coordinates: for a
+        // transport of size 1 a mesh point is a passenger offset. One mesh per display id for the whole server,
+        // read from its file on the first request and never changed afterwards, so every map's thread may read it.
+        // Empty for a model without a usable file; that answer is remembered, the disk is asked once per model.
+        // Takes a lock and may read the disk: for the creation of a transport, not for a path request.
+        static std::shared_ptr<dtNavMesh const> GetVesselNavMesh(uint32 displayId);
 
     private:
         static uint32 packTileID(int32 x, int32 y);

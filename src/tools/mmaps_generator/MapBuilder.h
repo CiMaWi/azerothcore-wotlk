@@ -105,7 +105,8 @@ namespace MMAP
                               MeshData& meshData,
                               float bmin[3],
                               float bmax[3],
-                              dtNavMesh* navMesh);
+                              dtNavMesh* navMesh,
+                              Optional<uint32> vesselDisplayId = {});
 
         bool shouldSkipTile(uint32 mapID, uint32 tileX, uint32 tileY) const;
 
@@ -131,6 +132,9 @@ namespace MMAP
 
         void buildMeshFromFile(char* name);
 
+        // builds one navmesh tile per collision model of the display ids in the list, in the model's coordinates
+        void buildVessels(char const* listFile);
+
         // builds an mmap tile for the specified map and its mesh
         void buildSingleTile(uint32 mapID, uint32 tileX, uint32 tileY);
 
@@ -146,6 +150,9 @@ namespace MMAP
         std::set<uint32>* getTileList(uint32 mapID);
 
         void buildNavMesh(uint32 mapID, dtNavMesh*& navMesh);
+
+        // loads a vessel's written tile as one Detour tile and prints its polygons; false when it has none
+        bool checkVesselTile(uint32 displayId, float const* bmin, float const* bmax) const;
 
         void getTileBounds(uint32 tileX, uint32 tileY,
                            float* verts, int vertCount,
