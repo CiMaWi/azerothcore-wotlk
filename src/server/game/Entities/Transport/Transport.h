@@ -52,8 +52,9 @@ public:
 
     // Deck places, on the map's thread, in offsets: the nearest deck point to an offset, and a random deck point
     // within a radius of an offset and connected to it (PathGenerator::FindVesselNearestPoint, FindVesselRandomPoint).
-    // Both take the map's query of this model and the bots' polygons (ground and water; no steep ground, lava or
-    // slime). False for a transport without a mesh, or when no deck polygon is near the offset.
+    // Both take the map's query of this model and the deck's rule for a bot (ground, water and steep ground; no lava
+    // or slime), as PathGenerator::CalculateVesselPath. False for a transport without a mesh, or when no deck polygon
+    // is near the offset.
     bool GetNearestDeckPoint(Position const& offset, Position& point) const;
     bool GetRandomDeckPoint(Position const& offset, float radius, Position& point) const;
 
