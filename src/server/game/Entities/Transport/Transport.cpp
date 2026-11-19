@@ -63,12 +63,14 @@ void Transport::LoadVesselNavMesh(GameObjectTemplate const* goinfo)
 
 namespace
 {
-    // the bots' polygons, as PathGenerator::CreateFilter gives a headless player
+    // The deck's rule (navigation NV.25), as PathGenerator::CalculateVesselPath gives a bot aboard: the bots' polygons
+    // (PathGenerator::CreateFilter for a headless player) with steep ground, since a deck has no mountainside to keep
+    // off and its steep polygons join one part of the deck to the next.
     dtQueryFilterExt DeckPlaceFilter()
     {
         dtQueryFilterExt filter;
-        filter.setIncludeFlags(NAV_GROUND | NAV_WATER);
-        filter.setExcludeFlags(NAV_MAGMA | NAV_SLIME | NAV_GROUND_STEEP);
+        filter.setIncludeFlags(NAV_GROUND | NAV_WATER | NAV_GROUND_STEEP);
+        filter.setExcludeFlags(NAV_MAGMA | NAV_SLIME);
         return filter;
     }
 }

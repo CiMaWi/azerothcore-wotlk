@@ -260,8 +260,23 @@ bool PathGenerator::CalculateVesselPath(G3D::Vector3 const& start, G3D::Vector3 
 
     UpdateFilter();
 
+    // The deck's rule (navigation NV.25): a unit that walks ground walks a deck's steep ground too. Ashore a bot keeps
+    // off steep mountainsides (CreateFilter); a deck has none, and its steep polygons join one part of the deck to the
+    // next. Creatures and real players take steep ground already. The search gets a copy: the unit's own filter stays
+    // as it is for its next call on the world's mesh. Transport's deck-place helpers search by the same rule.
+    dtQueryFilterExt deckFilter = _filter;
+    if (deckFilter.getIncludeFlags() & NAV_GROUND)
+    {
+        uint16 includeFlags = deckFilter.getIncludeFlags();
+        uint16 excludeFlags = deckFilter.getExcludeFlags();
+        includeFlags |= NAV_GROUND_STEEP;
+        excludeFlags &= ~uint16(NAV_GROUND_STEEP);
+        deckFilter.setIncludeFlags(includeFlags);
+        deckFilter.setExcludeFlags(excludeFlags);
+    }
+
     Movement::PointsArray points;
-    PathType const type = FindVesselPath(navMesh.get(), navMeshQuery, _filter, startOffset, endOffset, points, _pointPathLimit, _useStraightPath, _useRaycast);
+    PathType const type = FindVesselPath(navMesh.get(), navMeshQuery, deckFilter, startOffset, endOffset, points, _pointPathLimit, _useStraightPath, _useRaycast);
 
     // The polygon path kept from earlier calls is one on the world's mesh, and this call ran on another mesh: it is
     // dropped, so the next call on the world's mesh starts afresh. The vessel search keeps none.
