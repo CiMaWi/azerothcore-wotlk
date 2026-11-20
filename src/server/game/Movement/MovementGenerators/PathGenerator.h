@@ -118,6 +118,10 @@ class PathGenerator
         static bool FindVesselRandomPoint(dtNavMeshQuery const* navMeshQuery, dtQueryFilterExt const& filter, G3D::Vector3 const& offset, float radius,
                                           G3D::Vector3& point, float (*random)() = nullptr);
 
+        // Called, when set, with the time of each CalculatePath in microseconds, on the caller's thread. A module's
+        // performance monitor sets it once at load, before the map threads run; unset, the cost is a null test.
+        static void (*CalculatePathTimeHook)(uint32 microseconds);
+
         // result getters
         [[nodiscard]] G3D::Vector3 const& GetStartPosition() const { return _startPosition; }
         [[nodiscard]] G3D::Vector3 const& GetEndPosition() const { return _endPosition; }
@@ -221,6 +225,9 @@ class PathGenerator
         dtStatus FindSmoothPath(float const* startPos, float const* endPos,
                               dtPolyRef const* polyPath, uint32 polyPathSize,
                               float* smoothPath, int* smoothPathSize, uint32 smoothPathMaxSize);
+        dtStatus RepairSmoothPath(float const* startPos, float const* endPos, float* smoothPath, uint32& smoothPathSize,
+                                  dtStatus smoothResult);
+        dtStatus FindCornerPath(float const* startPos, float const* endPos, float* path, uint32& pathSize);
 
         void AddFarFromPolyFlags(bool startFarFromPoly, bool endFarFromPoly);
 };

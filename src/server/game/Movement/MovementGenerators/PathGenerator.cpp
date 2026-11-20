@@ -28,10 +28,40 @@
 #include "Transport.h"
 #include "VesselFrame.h"
 #include "WorldSession.h"
+#include <chrono>
+
+void (*PathGenerator::CalculatePathTimeHook)(uint32 microseconds) = nullptr;
 
 // Blades Edge Arena Ropes normalization
 namespace
 {
+    // Times one CalculatePath for PathGenerator::CalculatePathTimeHook; without a hook it reads no clock
+    class CalculatePathTimer
+    {
+    public:
+        explicit CalculatePathTimer(void (*hook)(uint32)) : _hook(hook)
+        {
+            if (_hook)
+                _start = std::chrono::steady_clock::now();
+        }
+
+        ~CalculatePathTimer()
+        {
+            if (_hook)
+            {
+                auto const elapsed = std::chrono::steady_clock::now() - _start;
+                _hook(uint32(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()));
+            }
+        }
+
+        CalculatePathTimer(CalculatePathTimer const&) = delete;
+        CalculatePathTimer& operator=(CalculatePathTimer const&) = delete;
+
+    private:
+        void (*_hook)(uint32);
+        std::chrono::steady_clock::time_point _start;
+    };
+
     constexpr float BLADE_EDGE_ROPE_SNAP_DIST = 1.5f;
     constexpr float BLADE_EDGE_ROPE_SNAP_DIST2 = BLADE_EDGE_ROPE_SNAP_DIST * BLADE_EDGE_ROPE_SNAP_DIST;
 
@@ -171,6 +201,7 @@ bool PathGenerator::CalculatePath(float x, float y, float z, float destX, float 
     if (!Acore::IsValidMapCoord(destX, destY, destZ) || !Acore::IsValidMapCoord(x, y, z))
         return false;
 
+    CalculatePathTimer const timer(CalculatePathTimeHook);
     METRIC_DETAILED_EVENT("mmap_events", "CalculatePath", "");
 
     G3D::Vector3 dest(destX, destY, destZ);
@@ -476,23 +507,14 @@ PathType PathGenerator::BuildVesselPath(G3D::Vector3 const& start, G3D::Vector3 
     if (_useStraightPath)
         pointResult = _navMeshQuery->findStraightPath(startPoint, endPoint, _pathPolyRefs, _polyLength, pathPoints, nullptr, nullptr, (int*)&pointCount, _pointPathLimit);
     else
-        pointResult = FindSmoothPath(startPoint, endPoint, _pathPolyRefs, _polyLength, pathPoints, (int*)&pointCount, _pointPathLimit);
-
-    // The smoothing steps 4 yd toward the next corner of the corridor, past the corner when it is near, sliding along
-    // the walls. At a turn onto a deck's narrow stair or gangway that step can end in a polygon the corridor has just
-    // left; the corridor's fix-up turns it round, the next step overshoots again, and the smoothing goes back and
-    // forth until it runs out of points, which it reports as a failure. The world gives no path there; aboard, where
-    // the corridor is whole, the corridor's corners are the path.
-    if (!_useStraightPath && dtStatusFailed(pointResult) && pointCount >= MAX_POINT_PATH_LENGTH)
     {
-        pointCount = 0;
-        pointResult = _navMeshQuery->findStraightPath(startPoint, endPoint, _pathPolyRefs, _polyLength, pathPoints, nullptr, nullptr, (int*)&pointCount, _pointPathLimit);
+        pointResult = FindSmoothPath(startPoint, endPoint, _pathPolyRefs, _polyLength, pathPoints, (int*)&pointCount,
+                                     _pointPathLimit);
+        pointResult = RepairSmoothPath(startPoint, endPoint, pathPoints, pointCount, pointResult);
     }
 
-    // Start and end very close to each other: the first point is the start, append the end. The smoothing stops at
-    // the start when every corner and the end lie within its slop; on a deck's small polygons two such ends often
-    // lie on two polygons, where the world's test (a single polygon) would answer no path for a move of a step.
-    if (pointCount == 1 && (_polyLength == 1 || (dtStatusSucceed(pointResult) && dtVdist2D(startPoint, endPoint) <= SMOOTH_PATH_SLOP)))
+    // Start and end on one polygon very close to each other: the first point is the start, append the end.
+    if (pointCount == 1 && _polyLength == 1)
     {
         dtVcopy(&pathPoints[1 * VERTEX_SIZE], endPoint);
         pointCount++;
@@ -973,6 +995,7 @@ void PathGenerator::BuildPointPath(float const* startPoint, float const* endPoin
             pathPoints,         // [out] path corner points
             (int*)&pointCount,
             _pointPathLimit);    // maximum number of points
+        dtResult = RepairSmoothPath(startPoint, endPoint, pathPoints, pointCount, dtResult);
     }
 
     // Special case with start and end positions very close to each other
@@ -1416,6 +1439,78 @@ dtStatus PathGenerator::FindSmoothPath(float const* startPos, float const* endPo
 
     // this is most likely a loop
     return nsmoothPath < MAX_POINT_PATH_LENGTH ? DT_SUCCESS : DT_FAILURE;
+}
+
+// The smoothing gives up in two places where its corridor joins the ends, and the corridor itself is the path there
+// (world and vessel searches alike):
+// - It steps 4 yd toward the corridor's next corner, past the corner when that is near, sliding along the walls. Where
+//   several polygons meet (a corner of the mesh's build grid, a deck's narrow stair or gangway) the step can end in a
+//   polygon the corridor has just left; the corridor's fix-up turns it round, the next step overshoots again, and the
+//   smoothing goes back and forth until it runs out of points, which it reports as a failure. The corridor's corners
+//   are the path then (FindCornerPath). A path too long for the points fails there too; its corner path reaches the
+//   point limit and is answered as such a path.
+// - It stops at its first point when every corner and the end lie within its slop. On one polygon the callers append
+//   the end; on two or more, the end on the last polygon (where the smoothing would have put it) is the one step.
+// A failure of the slope check (DT_SLOPE_TOO_STEEP) is no give-up and keeps its answer.
+dtStatus PathGenerator::RepairSmoothPath(float const* startPos, float const* endPos, float* smoothPath,
+                                         uint32& smoothPathSize, dtStatus smoothResult)
+{
+    if (dtStatusFailed(smoothResult) && smoothPathSize >= MAX_POINT_PATH_LENGTH)
+        return FindCornerPath(startPos, endPos, smoothPath, smoothPathSize);
+
+    if (smoothPathSize == 1 && _polyLength > 1 && dtStatusSucceed(smoothResult) &&
+        dtVdist2D(smoothPath, endPos) <= SMOOTH_PATH_SLOP &&
+        dtStatusSucceed(_navMeshQuery->closestPointOnPolyBoundary(_pathPolyRefs[_polyLength - 1], endPos,
+                                                                  &smoothPath[VERTEX_SIZE])))
+        smoothPathSize = 2;
+
+    return smoothResult;
+}
+
+// The corridor's corners as a point path, stepped like the smoothing: a point every SMOOTH_PATH_STEP_SIZE between two
+// corners, at the height of the corridor's polygon under it (in the world 0.5 above, as the smoothing; NormalizePath
+// then puts every point on the ground), so that a long straight piece does not cut through a rise or a dip. The
+// corridor's straight path crosses its polygons in order, so the polygon under a point is looked for from the last one
+// found; a point on none keeps the height between its corners. A path longer than the point limit ends at the limit.
+dtStatus PathGenerator::FindCornerPath(float const* startPos, float const* endPos, float* path, uint32& pathSize)
+{
+    pathSize = 0;
+    float corners[MAX_POINT_PATH_LENGTH * VERTEX_SIZE];
+    int cornerCount = 0;
+    if (dtStatusFailed(_navMeshQuery->findStraightPath(startPos, endPos, _pathPolyRefs, _polyLength, corners, nullptr,
+                                                       nullptr, &cornerCount, _pointPathLimit)) ||
+        cornerCount < 1)
+        return DT_FAILURE;
+
+    float const lift = IsVesselSearch() ? 0.0f : 0.5f;
+    uint32 poly = 0;
+    dtVcopy(path, corners);
+    pathSize = 1;
+    for (int corner = 1; corner < cornerCount && pathSize < _pointPathLimit; ++corner)
+    {
+        float const* from = &corners[(corner - 1) * VERTEX_SIZE];
+        float const* to = &corners[corner * VERTEX_SIZE];
+        uint32 const steps = uint32(std::ceil(dtVdist2D(from, to) / SMOOTH_PATH_STEP_SIZE));
+        for (uint32 step = 1; step < steps && pathSize < _pointPathLimit; ++step)
+        {
+            float* point = &path[pathSize++ * VERTEX_SIZE];
+            dtVlerp(point, from, to, float(step) / float(steps));
+            for (uint32 i = poly; i < _polyLength; ++i)
+            {
+                if (dtStatusSucceed(_navMeshQuery->getPolyHeight(_pathPolyRefs[i], point, &point[1])))
+                {
+                    point[1] += lift;
+                    poly = i;
+                    break;
+                }
+            }
+        }
+
+        if (pathSize < _pointPathLimit)
+            dtVcopy(&path[pathSize++ * VERTEX_SIZE], to);
+    }
+
+    return DT_SUCCESS;
 }
 
 bool PathGenerator::IsWalkableClimb(float const* v1, float const* v2) const
