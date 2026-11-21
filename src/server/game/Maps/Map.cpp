@@ -19,6 +19,7 @@
 #include "Battleground.h"
 #include "CellImpl.h"
 #include "Chat.h"
+#include "CreatureGroups.h"
 #include "DisableMgr.h"
 #include "DynamicTree.h"
 #include "GameTime.h"
@@ -601,6 +602,51 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
     SendMapSectionStats(GetId(), players);
 }
 
+// Files an object of the update list under the reason that keeps it there, for the perf sample. The reasons are
+// those of Creature::IsUpdateNeeded and GameObject::IsUpdateNeeded, with what players see or stand near filed first;
+// an object kept by a rule added there and not here counts as leaving.
+static LightweightPerf::ObjectKind ObjectKindOf(Map* map, WorldObject* obj)
+{
+    using namespace LightweightPerf;
+    bool const seen = !obj->GetObjectVisibilityContainer().GetVisiblePlayersMap().empty();
+    bool const cell = map->isCellMarked(obj->GetCurrentCell().GetCellCoord().GetId());
+    if (Creature* creature = obj->ToCreature())
+    {
+        if (seen)
+            return CreatureSeen;
+        if (cell)
+            return CreatureCell;
+        if (creature->isActiveObject())
+            return CreatureActive;
+        if (creature->IsInCombat())
+            return CreatureCombat;
+        if (creature->ToTempSummon())
+            return CreatureSummon;
+        if (creature->GetMotionMaster()->HasMovementGeneratorType(WAYPOINT_MOTION_TYPE))
+            return CreatureWaypoint;
+        if (creature->HasUnitState(UNIT_STATE_EVADE))
+            return CreatureEvade;
+        if (creature->GetFormation() && creature->GetFormation()->GetLeader() != creature)
+            return CreatureFormation;
+        return CreatureLeaving;
+    }
+
+    if (GameObject* gameObject = obj->ToGameObject())
+    {
+        if (seen)
+            return GameObjectSeen;
+        if (cell)
+            return GameObjectCell;
+        if (gameObject->isActiveObject())
+            return GameObjectActive;
+        if (gameObject->IsTransport())
+            return GameObjectTransport;
+        return GameObjectLeaving;
+    }
+
+    return DynamicObjects;
+}
+
 void Map::UpdateNonPlayerObjects(uint32 const diff)
 {
     for (WorldObject* obj : _pendingAddUpdatableObjectList)
@@ -609,6 +655,10 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
 
     if (_updatableObjectListRecheckTimer.Passed())
     {
+        // The recheck pass is also the perf sample: only here are the cells near players marked, and one pass in
+        // 30 s costs nothing
+        bool const sampled = LightweightPerf::MapTimed();
+        std::array<LightweightPerf::Row, LightweightPerf::ObjectKindCount> kinds{};
         for (uint32 i = 0; i < _updatableObjectList.size();)
         {
             WorldObject* obj = _updatableObjectList[i];
@@ -618,7 +668,16 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
                 continue;
             }
 
-            obj->Update(diff);
+            if (sampled)
+            {
+                LightweightPerf::ObjectKind const kind = ObjectKindOf(this, obj);
+                auto const start = std::chrono::steady_clock::now();
+                obj->Update(diff);
+                kinds[kind].Add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - start).count());
+            }
+            else
+                obj->Update(diff);
 
             if (!obj->IsUpdateNeeded())
             {
@@ -629,6 +688,8 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
             else
                 ++i;
         }
+        if (sampled)
+            LightweightPerf::RecordObjectKinds(kinds);
         _updatableObjectListRecheckTimer.Reset();
     }
     else
