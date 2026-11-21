@@ -106,6 +106,7 @@ namespace Trainer
             return;
         }
 
+        sScriptMgr->OnPlayerBeforeTrainSpell(player, npc, spellId, moneyCost);
         player->ModifyMoney(-moneyCost);
 
         npc->SendPlaySpellVisual(179); // 53 SpellCastDirected

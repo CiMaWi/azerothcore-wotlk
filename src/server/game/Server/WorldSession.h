@@ -1215,6 +1215,11 @@ public:                                                 // opcodes handlers
     bool IsKicked() const { return _kicked; }
     void SetKicked(bool val) { _kicked = val; }
     bool IsSocketClosed() const;
+    // Whether a client is behind the session (a bot, a test player, a real player whose client is gone has none), so
+    // update blocks and packets built for it would be thrown away. A headless session never gets a socket, so this
+    // also covers IsHeadless(). Read only; m_Socket is cleared on the world thread only, which waits while the map
+    // threads run.
+    [[nodiscard]] bool HasClient() const { return !IsSocketClosed(); }
 
     /*
      * CALLBACKS
