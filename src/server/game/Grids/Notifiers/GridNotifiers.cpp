@@ -61,7 +61,7 @@ void VisibleNotifier::SendToSelf()
 
     // No client behind the session (bots): the visibility set still changes, but i_data stays empty (create blocks are
     // not built for it either), so no packet and no initial aura/attack packets follow
-    bool const hasClient = !i_player.GetSession()->IsSocketClosed();
+    bool const hasClient = i_player.GetSession()->HasClient();
 
     VisibleWorldObjectsMap* visibleWorldObjects = i_player.GetObjectVisibilityContainer().GetVisibleWorldObjectsMap();
     for (VisibleWorldObjectsMap::iterator itr = visibleWorldObjects->begin(); itr != visibleWorldObjects->end();)

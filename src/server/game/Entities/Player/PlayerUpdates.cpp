@@ -1713,7 +1713,7 @@ void Player::UpdateVisibilityOf(T* target, UpdateData& data,
             BeforeVisibilityDestroy<T>(target, this);
 
             // No client behind the session (bots): unlink only, no out-of-range block
-            if (!GetSession()->IsSocketClosed())
+            if (GetSession()->HasClient())
                 target->BuildOutOfRangeUpdateBlock(&data);
             GetObjectVisibilityContainer().UnlinkWorldObjectVisibility(target);
         }
@@ -1732,7 +1732,7 @@ void Player::UpdateVisibilityOf(T* target, UpdateData& data,
 void Player::GetInitialVisiblePackets(Unit* target)
 {
     // Aura and melee-start packets for this client only: nothing to send without a socket
-    if (GetSession()->IsSocketClosed())
+    if (!GetSession()->HasClient())
         return;
 
     GetAurasForTarget(target);
