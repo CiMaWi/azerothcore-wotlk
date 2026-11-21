@@ -236,6 +236,10 @@ enum PlayerHook
     PLAYERHOOK_ON_BEFORE_RECEIVE_SPELL_LIST_FROM_TRAINER,
     PLAYERHOOK_ON_GET_TRAINER_SPELL_STATE,
     PLAYERHOOK_ON_AFTER_TRAIN_SPELL,
+    PLAYERHOOK_ON_AFTER_GIVE_QUEST_XP,
+    PLAYERHOOK_ON_BEFORE_TRAIN_SPELL,
+    PLAYERHOOK_ON_AFTER_WORLDPORT,
+    PLAYERHOOK_ON_BEFORE_SWAP_ITEM,
     PLAYERHOOK_END
 };
 
@@ -971,6 +975,51 @@ public:
      * @param spellId The id of the trainer spell that was bought
      */
     virtual void OnPlayerAfterTrainSpell(Player* /*player*/, Creature* /*trainer*/, uint32 /*spellId*/) {}
+
+    /**
+     * @brief This hook is called after a quest reward gave the player experience, with the amount
+     *        given (after OnPlayerGiveXP). Not called when the quest gives money instead (max level).
+     *
+     * @param player Contains information about the Player
+     * @param quest The quest being rewarded
+     * @param xp The experience given
+     * @param xpSource XPSOURCE_QUEST, or XPSOURCE_QUEST_DF for a dungeon finder reward
+     */
+    virtual void OnPlayerAfterGiveQuestXP(Player* /*player*/, Quest const* /*quest*/, uint32 /*xp*/, uint8 /*xpSource*/) {}
+
+    /**
+     * @brief This hook is called when a trainer purchase goes through, right before the money is
+     *        taken. Every call is followed by OnPlayerAfterTrainSpell, and the spells the purchase
+     *        teaches are learned between the two.
+     *
+     * @param player Contains information about the Player
+     * @param trainer Contains information about the trainer
+     * @param spellId The id of the trainer spell being bought
+     * @param cost The money about to be taken
+     */
+    virtual void OnPlayerBeforeTrainSpell(Player* /*player*/, Creature* /*trainer*/, uint32 /*spellId*/, int32 /*cost*/) {}
+
+    /**
+     * @brief This hook is called when a far teleport completes: the player has been added to the
+     *        new map, the old map is not yet unlinked. Not called when adding to the new map failed.
+     *
+     * @param player Contains information about the Player, already on the new map
+     * @param oldMapId The id of the map the player left
+     */
+    virtual void OnPlayerAfterWorldport(Player* /*player*/, uint32 /*oldMapId*/) {}
+
+    /**
+     * @brief This hook is called when two items swap places, after every check passed and right
+     *        before both are removed and put into the other's position. When a position is an
+     *        equipment slot, the item moving there replaces the other one.
+     *
+     * @param player Contains information about the Player
+     * @param srcItem The item moving to dst
+     * @param dstItem The item moving to src
+     * @param src The position srcItem leaves
+     * @param dst The position dstItem leaves
+     */
+    virtual void OnPlayerBeforeSwapItem(Player* /*player*/, Item* /*srcItem*/, Item* /*dstItem*/, uint16 /*src*/, uint16 /*dst*/) {}
 };
 
 #endif

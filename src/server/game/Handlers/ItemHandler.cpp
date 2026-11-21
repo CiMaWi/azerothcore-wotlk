@@ -257,6 +257,7 @@ void WorldSession::HandleAutoEquipItemOpcode(WorldPackets::Item::AutoEquipItem& 
         }
 
         // now do moves, remove...
+        sScriptMgr->OnPlayerBeforeSwapItem(_player, pSrcItem, pDstItem, src, dest);
         _player->RemoveItem(dstbag, dstslot, true);
         _player->RemoveItem(packet.SourceBag, packet.SourceSlot, true);
 

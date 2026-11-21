@@ -3976,6 +3976,7 @@ void Player::SwapItem(uint16 src, uint16 dst)
     }
 
     // now do moves, remove...
+    sScriptMgr->OnPlayerBeforeSwapItem(this, pSrcItem, pDstItem, src, dst);
     RemoveItem(dstbag, dstslot, false);
     RemoveItem(srcbag, srcslot, false);
 
