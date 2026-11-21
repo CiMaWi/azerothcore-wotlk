@@ -64,6 +64,22 @@ namespace MMAP
         }
     }
 
+    // Recast's span merge (rcAddSpan) keeps the higher area id where two surfaces meet within the climb height, so a
+    // steep face rising no more than one step would tag the plain ground it meets and a bot's search, which refuses
+    // NAV_GROUND_STEEP, would refuse the step. While a tile is rasterized every id is shifted one bit up and the
+    // steep tag takes id 1, below plain ground (TrinityCore's order, ddcbc01a65): where a steep face and plain ground
+    // share a cell, the cell stays plain ground; a face rising above one step keeps its tag. Liquids keep their order
+    // against plain ground and win against steep ground. navArea maps the ids back before they become polygon flags.
+    static unsigned char rasterArea(unsigned char area)
+    {
+        return area == NAV_GROUND_STEEP ? 1 : static_cast<unsigned char>(area << 1);
+    }
+
+    static unsigned char navArea(unsigned char area)
+    {
+        return area == 1 ? static_cast<unsigned char>(NAV_GROUND_STEEP) : static_cast<unsigned char>(area >> 1);
+    }
+
     TileBuilder::TileBuilder(MapBuilder* mapBuilder, bool skipLiquid, bool debugOutput) :
             m_debugOutput(debugOutput),
             m_mapBuilder(mapBuilder),
@@ -846,7 +862,10 @@ namespace MMAP
         int lVertCount = meshData.liquidVerts.size() / 3;
         int* lTris = meshData.liquidTris.getCArray();
         int lTriCount = meshData.liquidTris.size() / 3;
-        uint8* lTriFlags = meshData.liquidType.getCArray();
+        std::vector<unsigned char> lRasterAreas(lTriCount);
+        for (int i = 0; i < lTriCount; ++i)
+            lRasterAreas[i] = rasterArea(meshData.liquidType[i]);
+        unsigned char* lTriFlags = lRasterAreas.data();
 
         // a vessel's model takes the global meshSettings: no map or tile override applies to it
         ResolvedMeshConfig cfg = vesselDisplayId ? m_mapBuilder->getConfig().GetGlobalConfig()
@@ -929,7 +948,11 @@ namespace MMAP
                     memset(triFlags, NAV_GROUND, tTriCount * sizeof(unsigned char));
                     rcClearUnwalkableTriangles(m_rcContext, tileCfg.walkableSlopeAngle, tVerts, tVertCount, tTris, tTriCount, triFlags);
                     // mod_playerbots (bots should not attempt to use paths that includes slopes beyound 50 degrees)
+                    // A steep face that rises no more than one step is a step: rasterArea puts the tag below plain
+                    // ground, so the cell where the face meets plain ground stays plain ground.
                     modAlmostUnwalkableTriangles(50.0f, tVerts, tVertCount, tTris, tTriCount, triFlags);
+                    for (int i = 0; i < tTriCount; ++i)
+                        triFlags[i] = rasterArea(triFlags[i]);
                     rcRasterizeTriangles(m_rcContext, tVerts, tVertCount, tTris, triFlags, tTriCount, *tile.solid, config.walkableClimb);
                     delete[] triFlags;
 
@@ -1056,8 +1079,11 @@ namespace MMAP
         // set polygons as walkable
         /// @todo: special flags for DYNAMIC polygons, ie surfaces that can be turned on and off
         for (int i = 0; i < iv.polyMesh->npolys; ++i)
+        {
+            iv.polyMesh->areas[i] = navArea(iv.polyMesh->areas[i]);
             if (iv.polyMesh->areas[i] & RC_WALKABLE_AREA)
                 iv.polyMesh->flags[i] = iv.polyMesh->areas[i];
+        }
 
         // setup mesh parameters
         dtNavMeshCreateParams params;
