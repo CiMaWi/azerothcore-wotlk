@@ -62,6 +62,9 @@ class MMapData
 public:
     dtNavMesh const* GetNavMesh() const { return _navMesh.get(); }
     dtNavMeshQuery const* GetNavMeshQuery();
+    // The same with a node pool of MMAP::WIDE_SEARCH_NODES, for the searches that ask it
+    // (PathGenerator::SetWideSearch), made on the first request: a map where none does holds no such query.
+    dtNavMeshQuery const* GetWideNavMeshQuery();
     // The query on a vessel's mesh (MMapMgr::GetVesselNavMesh) for this map, made on the first request. A vessel
     // sails from map to map, so the query is taken from the map the asking unit is on, at each request.
     dtNavMeshQuery const* GetVesselNavMeshQuery(uint32 displayId, std::shared_ptr<dtNavMesh const> const& navMesh);
@@ -78,6 +81,7 @@ protected:
     std::shared_ptr<dtNavMesh> _navMesh;
     // navMeshQuery is not thread safe and needs its own instance per map
     MMAP::ManagedNavMeshQuery _navMeshQuery;
+    MMAP::ManagedNavMeshQuery _wideNavMeshQuery;
     // the same holds on a vessel's mesh: one query per map and vessel model (display id)
     std::unordered_map<uint32, VesselNavMeshQuery> _vesselNavMeshQueries;
 };

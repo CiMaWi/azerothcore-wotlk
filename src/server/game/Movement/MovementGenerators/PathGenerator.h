@@ -99,6 +99,10 @@ class PathGenerator
         // a single NavTerrain or an OR'd combination (NavTerrain values
         // implicitly convert through uint16).
         void SetExcludeFlags(uint16 flags) { _filter.setExcludeFlags(flags); }
+        // On, the world's search uses the map's wide query (MMapData::GetWideNavMeshQuery: a node pool that spans a
+        // long walk); off, the map's query of 1,024 nodes, every caller's default. Set before CalculatePath; no effect
+        // on a vessel's search, which has its own query.
+        void SetWideSearch(bool wide);
 
         // The search on a vessel's mesh (MMapMgr::GetVesselNavMesh), the only one: vessel mode wraps it with the turn
         // from the world into the vessel's coordinates and back, a probe calls it with a query of its own. start,
@@ -130,6 +134,9 @@ class PathGenerator
         [[nodiscard]] Movement::PointsArray const& GetPath() const { return _pathPoints; }
 
         [[nodiscard]] PathType GetPathType() const { return _type; }
+        // The Detour status of the last CalculatePath's polygon search (findPath on the world's mesh), 0 when it ran
+        // none: DT_OUT_OF_NODES or DT_PARTIAL_RESULT say why a path fell short of its end.
+        [[nodiscard]] dtStatus GetSearchStatus() const { return _searchStatus; }
 
         // shortens the path until the destination is the specified distance from the target point
         void ShortenPathUntilDist(G3D::Vector3 const& point, float dist);
@@ -191,6 +198,7 @@ class PathGenerator
         WorldObject const* const _source;       // the object that is moving; none in a vessel search
         dtNavMesh const* _navMesh;              // the nav mesh
         dtNavMeshQuery const* _navMeshQuery;    // the nav mesh query used to find the path
+        dtStatus _searchStatus = 0;             // the last world search's status (GetSearchStatus)
 
         dtQueryFilterExt _filter;  // use single filter for all movements, update it when needed
 

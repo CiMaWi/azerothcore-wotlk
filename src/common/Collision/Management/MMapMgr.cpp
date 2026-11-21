@@ -200,13 +200,13 @@ namespace MMAP
         return false;
     }
 
-    ManagedNavMeshQuery MMapMgr::CreateNavMeshQuery(dtNavMesh const* navMesh)
+    ManagedNavMeshQuery MMapMgr::CreateNavMeshQuery(dtNavMesh const* navMesh, uint16 maxNodes)
     {
         // allocate mesh query
         dtNavMeshQuery* query = dtAllocNavMeshQuery();
         ASSERT(query);
 
-        if (dtStatusFailed(query->init(navMesh, 1024)))
+        if (dtStatusFailed(query->init(navMesh, maxNodes)))
         {
             dtFreeNavMeshQuery(query);
             return nullptr;
