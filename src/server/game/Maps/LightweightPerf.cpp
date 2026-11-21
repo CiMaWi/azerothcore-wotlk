@@ -139,6 +139,22 @@ constexpr char const* MapNames[] = {"sessions",
                                     "cpu",
                                     "ai",
                                     "pregate",
+                                    "objects_sampled",
+                                    "objects_creature_seen",
+                                    "objects_creature_cell",
+                                    "objects_creature_active",
+                                    "objects_creature_combat",
+                                    "objects_creature_summon",
+                                    "objects_creature_waypoint",
+                                    "objects_creature_evade",
+                                    "objects_creature_formation",
+                                    "objects_creature_leaving",
+                                    "objects_gameobject_seen",
+                                    "objects_gameobject_cell",
+                                    "objects_gameobject_active",
+                                    "objects_gameobject_transport",
+                                    "objects_gameobject_leaving",
+                                    "objects_dynamicobject",
                                     "count_players",
                                     "count_player_updates",
                                     "count_cpu_valid",
@@ -254,6 +270,22 @@ void RecordMapSections(std::uint64_t const* sections, std::uint32_t players, std
         activeMap->Add(i, sections[i]);
     activeMap->Add(Players, players);
     activeMap->Add(PlayerUpdates, playerUpdates);
+}
+
+bool MapTimed() { return activeMap != nullptr; }
+
+void RecordObjectKinds(std::array<Row, ObjectKindCount> const& kinds)
+{
+    if (!activeMap)
+        return;
+
+    std::uint64_t total = 0;
+    for (std::size_t i = 0; i < ObjectKindCount; ++i)
+    {
+        activeMap->Merge(ObjectKinds + i, kinds[i]);
+        total += kinds[i].total;
+    }
+    activeMap->Add(ObjectsSampled, total);
 }
 
 AiScope::AiScope() : _task(activeMap), _start(_task ? Now() : 0) {}

@@ -50,6 +50,29 @@ enum WorldPhase : std::size_t
 
 constexpr std::size_t MapSectionCount = 11;
 
+// Why a non-player object is on a map's update list: the first reason that holds, in this order. Seen: a player
+// has it in view. Cell: a player's marked cells cover it, but no player sees it. The reasons after those keep an
+// object updating with no player near. Leaving: no reason holds any more, the recheck drops it.
+enum ObjectKind : std::size_t
+{
+    CreatureSeen,
+    CreatureCell,
+    CreatureActive,
+    CreatureCombat,
+    CreatureSummon,
+    CreatureWaypoint,
+    CreatureEvade,
+    CreatureFormation,
+    CreatureLeaving,
+    GameObjectSeen,
+    GameObjectCell,
+    GameObjectActive,
+    GameObjectTransport,
+    GameObjectLeaving,
+    DynamicObjects,
+    ObjectKindCount
+};
+
 enum MapRow : std::size_t
 {
     Task = MapSectionCount,
@@ -57,7 +80,11 @@ enum MapRow : std::size_t
     Cpu,
     Ai,
     Pregate,
-    Players,
+    // A sample, not a total: taken on the map update that rechecks the update list (every 30 s). ObjectsSampled
+    // counts those updates and their object time; the kind rows count the objects and their update time
+    ObjectsSampled,
+    ObjectKinds,
+    Players = ObjectKinds + ObjectKindCount,
     PlayerUpdates,
     CpuValid,
     CpuInvalid,
@@ -73,6 +100,10 @@ void Configure(bool enabled);
 std::uint64_t QueuedAt();
 void SetMapQueuedAt(std::uint64_t queuedAt);
 void RecordMapSections(std::uint64_t const* sections, std::uint32_t players, std::uint32_t playerUpdates);
+// True while a timed map task runs on this thread
+bool MapTimed();
+// One sampled pass over a map's update list: per ObjectKind the objects and their update time (ns)
+void RecordObjectKinds(std::array<Row, ObjectKindCount> const& kinds);
 // World thread only: it reads the world update-time table, whose percentiles sort it without a lock.
 std::string Snapshot(bool reset, bool metricsEnabled);
 
@@ -86,6 +117,7 @@ public:
     MapScope& operator=(MapScope const&) = delete;
 
     void Add(std::size_t row, std::uint64_t value) { _rows[row].Add(value); }
+    void Merge(std::size_t row, Row const& other) { _rows[row].Merge(other); }
 
 private:
     bool _on;
