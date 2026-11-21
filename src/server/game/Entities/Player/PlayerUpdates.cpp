@@ -27,6 +27,7 @@
 #include "Guild.h"
 #include "InstanceScript.h"
 #include "Language.h"
+#include "LightweightPerf.h"
 #include "OutdoorPvPMgr.h"
 #include "Pet.h"
 #include "Player.h"
@@ -56,6 +57,7 @@ void Player::Update(uint32 p_time)
         return;
 
     sScriptMgr->OnPlayerBeforeUpdate(this, p_time);
+    LightweightPerf::UnitLap(LightweightPerf::PhaseHooks);
 
     // undelivered mail
     if (m_nextMailDelivereTime && m_nextMailDelivereTime <= GameTime::GetGameTime().count())
@@ -69,10 +71,12 @@ void Player::Update(uint32 p_time)
 
     // Update cinematic camera (if needed)
     _cinematicMgr.UpdateCinematic(p_time);
+    LightweightPerf::UnitLap(LightweightPerf::PhaseRest);
 
     // used to implement delayed far teleports
     SetMustDelayTeleport(true);
     ProcessSpellQueue();
+    LightweightPerf::UnitLap(LightweightPerf::PhaseSpells);
     Unit::Update(p_time);
     SetMustDelayTeleport(false);
 
@@ -307,13 +311,16 @@ void Player::Update(uint32 p_time)
             m_zoneUpdateTimer -= p_time;
     }
 
+    LightweightPerf::UnitLap(LightweightPerf::PhaseRest);
     sScriptMgr->OnPlayerUpdate(this, p_time);
+    LightweightPerf::UnitLap(LightweightPerf::PhaseHooks);
 
     if (IsAlive())
     {
         m_regenTimer += p_time;
         RegenerateAll();
     }
+    LightweightPerf::UnitLap(LightweightPerf::PhaseRegen);
 
     if (m_deathState == DeathState::JustDied)
         KillPlayer();
@@ -424,7 +431,9 @@ void Player::Update(uint32 p_time)
         m_delayed_unit_relocation_timer = 0;
         RemoveFromNotify(NOTIFY_VISIBILITY_CHANGED);
     }
+    LightweightPerf::UnitLap(LightweightPerf::PhaseRest);
     sScriptMgr->OnPlayerAfterUpdate(this, p_time);
+    LightweightPerf::UnitLap(LightweightPerf::PhaseHooks);
 }
 
 void Player::UpdateMirrorTimers()
@@ -1704,6 +1713,7 @@ template <class T>
 void Player::UpdateVisibilityOf(T* target, UpdateData& data,
                                 std::vector<Unit*>& visibleNow)
 {
+    LightweightPerf::CountChecked(1);
     GetMap()->AddObjectToPendingUpdateList(target);
 
     if (HaveAtClient(target))

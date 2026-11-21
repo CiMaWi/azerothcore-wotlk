@@ -479,6 +479,17 @@ static void SendMapSectionStats(uint32 mapId, uint32 players)
         METRIC_TAG("counter", "create_nosocket"));
 }
 
+// The sample's delayed relocations, timed by mover type with the objects their notifiers visit
+static void SampleDelayedVisibility(std::unordered_set<Unit*>& movers)
+{
+    for (Unit* mover : movers)
+    {
+        LightweightPerf::VisibilityScope scope(true, mover->IsPlayer());
+        mover->ExecuteDelayedUnitRelocationEvent();
+    }
+    movers.clear();
+}
+
 void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
 {
     uint32 const players = m_mapRefMgr.getSize();
@@ -527,6 +538,8 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
     clock.Lap(MAP_SECTION_RESPAWNS);
 
     _updatableObjectListRecheckTimer.Update(t_diff);
+    // The recheck update is also the perf sample (UpdateNonPlayerObjects): only it times unit phases and relocations
+    bool const sample = _updatableObjectListRecheckTimer.Passed() && LightweightPerf::MapTimed();
     resetMarkedCells();
     clock.Lap(MAP_SECTION_MARK_CELLS);
 
@@ -538,7 +551,12 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
         if (!player || !player->IsInWorld())
             continue;
 
-        player->Update(s_diff);
+        {
+            LightweightPerf::UnitScope scope(sample,
+                                             player->IsInCombat() ? LightweightPerf::PlayerFight
+                                                                  : LightweightPerf::PlayerIdle);
+            player->Update(s_diff);
+        }
         ++mapSectionStats.playerUpdates;
         clock.Lap(MAP_SECTION_PLAYER_UPDATE);
 
@@ -580,6 +598,8 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
     MoveAllDynamicObjectsInMoveList();
     clock.Lap(MAP_SECTION_MOVES);
 
+    if (sample)
+        SampleDelayedVisibility(i_objectsForDelayedVisibility);
     HandleDelayedVisibility();
     clock.Lap(MAP_SECTION_DELAYED_VISIBILITY);
 
@@ -680,7 +700,15 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
             {
                 LightweightPerf::ObjectKind const kind = ObjectKindOf(obj, cellMarked(obj));
                 auto const start = std::chrono::steady_clock::now();
-                obj->Update(diff);
+                if (kind == LightweightPerf::CreatureSeen)
+                {
+                    LightweightPerf::UnitScope scope(true, obj->ToCreature()->IsInCombat()
+                                                               ? LightweightPerf::CreatureFight
+                                                               : LightweightPerf::CreatureIdle);
+                    obj->Update(diff);
+                }
+                else
+                    obj->Update(diff);
                 kinds[kind].Add(std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - start).count());
             }
