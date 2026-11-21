@@ -47,7 +47,7 @@ constexpr std::size_t MaxMaps = 128;
 struct MapRows
 {
     std::uint32_t id = 0;
-    std::array<std::array<Row, MapRowCount>, 2> ticks{};
+    std::array<Row, MapRowCount> rows{};
 };
 
 struct Interval
@@ -196,7 +196,7 @@ std::uint64_t QueuedAt() { return Enabled() ? Now() : 0; }
 
 void SetMapQueuedAt(std::uint64_t queuedAt) { mapQueuedAt = queuedAt; }
 
-MapScope::MapScope(std::uint32_t mapId, bool full) : _on(Enabled()), _full(full), _mapId(mapId)
+MapScope::MapScope(std::uint32_t mapId) : _on(Enabled()), _mapId(mapId)
 {
     std::uint64_t const queuedAt = mapQueuedAt;
     mapQueuedAt = 0;
@@ -240,19 +240,18 @@ MapScope::~MapScope()
     if (index == MaxMaps)
         _rows[OverflowTasks].Add(1);
 
-    auto& target = interval.maps[index].ticks[_full ? 1 : 0];
+    auto& target = interval.maps[index].rows;
     for (std::size_t i = 0; i < MapRowCount; ++i)
         target[i].Merge(_rows[i]);
 }
 
-void RecordMapSections(std::uint64_t const* sections, bool full, std::uint32_t players, std::uint32_t playerUpdates)
+void RecordMapSections(std::uint64_t const* sections, std::uint32_t players, std::uint32_t playerUpdates)
 {
     if (!activeMap)
         return;
 
     for (std::size_t i = 0; i < MapSectionCount; ++i)
-        if (full || MapSectionInShortTick[i])
-            activeMap->Add(i, sections[i]);
+        activeMap->Add(i, sections[i]);
     activeMap->Add(Players, players);
     activeMap->Add(PlayerUpdates, playerUpdates);
 }
@@ -364,14 +363,12 @@ std::string Snapshot(bool reset, bool metricsEnabled)
         if (m >= result.mapCount && m != MaxMaps)
             continue;
         std::string const id = m == MaxMaps ? "overflow" : std::to_string(result.maps[m].id);
-        for (std::size_t full = 0; full < 2; ++full)
-        {
-            auto const& ticks = result.maps[m].ticks[full];
-            // The pair counters stand beside every ai row, also while nothing feeds them
-            for (std::size_t i = 0; i < MapRowCount; ++i)
-                WriteRow(out, first, "map/" + id + (full ? "/full/" : "/short/") + MapNames[i], ticks[i], i >= Players,
-                         i >= WorkMaskUpdates && ticks[Ai].calls);
-        }
+        // Every map update is a full one. The row names keep "full", so stored intervals and the tools that read
+        // them still match. The pair counters stand beside every ai row, also while nothing feeds them
+        auto const& rows = result.maps[m].rows;
+        for (std::size_t i = 0; i < MapRowCount; ++i)
+            WriteRow(out, first, "map/" + id + "/full/" + MapNames[i], rows[i], i >= Players,
+                     i >= WorkMaskUpdates && rows[Ai].calls);
     }
     out << ']';
 

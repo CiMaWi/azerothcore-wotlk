@@ -77,8 +77,7 @@ public:
         if (t < MIN_MAP_UPDATE_DELAY)
             t = MIN_MAP_UPDATE_DELAY;
 
-        i_timer[3].SetInterval(t);
-        i_timer[3].Reset();
+        i_timer.SetInterval(t);
     }
 
     //void LoadGrid(int mapid, int instId, float x, float y, WorldObject const* obj, bool no_unload = false);
@@ -170,8 +169,7 @@ private:
 
     std::mutex Lock;
     MapMapType i_maps;
-    IntervalTimer i_timer[4]; // continents, bgs/arenas, instances, total from the beginning
-    uint8 mapUpdateStep;
+    IntervalTimer i_timer; // time since the last update of the maps; they update once MapUpdateInterval has passed
 
     InstanceIds _instanceIds;
     uint32 _nextInstanceId;

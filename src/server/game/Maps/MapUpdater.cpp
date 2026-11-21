@@ -47,7 +47,7 @@ public:
         {
             // Include derived updates and merge before the completion signal releases the world thread.
             LightweightPerf::SetMapQueuedAt(m_queuedAt);
-            LightweightPerf::MapScope perf(m_map.GetId(), m_diff != 0);
+            LightweightPerf::MapScope perf(m_map.GetId());
             m_map.Update(m_diff, s_diff);
         }
         m_updater.update_finished();
