@@ -30,10 +30,8 @@
 #include "VMapDefinitions.h"
 #include "VMapMgr2.h"
 #include "WorldModel.h"
-#include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdlib>
 #include <fstream>
 #include <unordered_map>
 
@@ -80,109 +78,6 @@ namespace MMAP
     static unsigned char navArea(unsigned char area)
     {
         return area == 1 ? static_cast<unsigned char>(NAV_GROUND_STEEP) : static_cast<unsigned char>(area >> 1);
-    }
-
-    // Plain ground keeps a cell it shares with a steep face (a contested cell) only on the lip of a step: where the
-    // patch of contested cells joined to it (4-neighbours whose tops lie within the climb) rises no more than the
-    // climb within one climb height around the cell. Along the edges of steep faces up a hillside the patch rises
-    // above the climb, and its cells go back to the steep tag as before the rule; otherwise the plain triangles of a
-    // hillside of steep and plain triangles would join through those edges. A lip along a gently rising street
-    // stays plain. The contested cells are found by rasterizing the triangles a second time with the steep tag
-    // above plain ground: both heightfields have the same spans, only the merged area differs.
-    static void restoreSteepFaces(rcContext* ctx, float const* verts, int nv, int const* tris, unsigned char const* areas,
-                                  int nt, rcConfig const& cfg, int flagMergeThr, rcHeightfield& solid)
-    {
-        unsigned char const steep = rasterArea(NAV_GROUND_STEEP);
-        unsigned char const ground = rasterArea(NAV_GROUND);
-        unsigned char const steepFirst = 0xFF; // internal ids, never left in a heightfield
-        unsigned char const contested = 0xFE;
-        unsigned char const visited = 0xFD;
-        std::vector<unsigned char> checkAreas(areas, areas + nt);
-        for (unsigned char& area : checkAreas)
-            if (area == steep)
-                area = steepFirst;
-
-        rcHeightfield* check = rcAllocHeightfield();
-        if (!check || !rcCreateHeightfield(ctx, *check, cfg.width, cfg.height, cfg.bmin, cfg.bmax, cfg.cs, cfg.ch))
-        {
-            rcFreeHeightField(check);
-            return;
-        }
-        rcRasterizeTriangles(ctx, verts, nv, tris, checkAreas.data(), nt, *check, flagMergeThr);
-
-        int const w = solid.width;
-        int const h = solid.height;
-        for (int c = 0; c < w * h; ++c)
-            for (rcSpan *s = solid.spans[c], *t = check->spans[c]; s && t && s->smin == t->smin && s->smax == t->smax;
-                 s = s->next, t = t->next)
-                if (s->area == ground && t->area == steepFirst)
-                    s->area = contested;
-        rcFreeHeightField(check);
-
-        int const climb = cfg.walkableClimb;
-        // the window of the local rise: one climb height across, in cells
-        int const reach = std::max(1, int(std::ceil(cfg.walkableClimb * cfg.ch / cfg.cs)));
-        std::vector<std::pair<int, rcSpan*>> open;
-        std::vector<std::pair<int, rcSpan*>> patch;
-        std::unordered_map<int, std::vector<int>> tops;
-        for (int c = 0; c < w * h; ++c)
-            for (rcSpan* s = solid.spans[c]; s; s = s->next)
-            {
-                if (s->area != contested)
-                    continue;
-                s->area = visited;
-                open.emplace_back(c, s);
-                patch.clear();
-                int lo = s->smax;
-                int hi = s->smax;
-                while (!open.empty())
-                {
-                    auto const [cell, span] = open.back();
-                    open.pop_back();
-                    patch.emplace_back(cell, span);
-                    lo = std::min<int>(lo, span->smax);
-                    hi = std::max<int>(hi, span->smax);
-                    int const x = cell % w;
-                    int const y = cell / w;
-                    int const next[4][2] = { { x - 1, y }, { x + 1, y }, { x, y - 1 }, { x, y + 1 } };
-                    for (auto const& n : next)
-                    {
-                        if (n[0] < 0 || n[1] < 0 || n[0] >= w || n[1] >= h)
-                            continue;
-                        for (rcSpan* ns = solid.spans[n[0] + n[1] * w]; ns; ns = ns->next)
-                            if (ns->area == contested && std::abs(int(ns->smax) - int(span->smax)) <= climb)
-                            {
-                                ns->area = visited;
-                                open.emplace_back(n[0] + n[1] * w, ns);
-                            }
-                    }
-                }
-                if (hi - lo <= climb)
-                {
-                    for (auto const& p : patch)
-                        p.second->area = ground;
-                    continue;
-                }
-                // a long patch: each cell by the rise of the patch within one climb height around it
-                tops.clear();
-                for (auto const& p : patch)
-                    tops[p.first].push_back(p.second->smax);
-                for (auto const& [cell, span] : patch)
-                {
-                    int const x = cell % w;
-                    int const y = cell / w;
-                    bool rises = false;
-                    for (int ny = std::max(0, y - reach); ny <= std::min(h - 1, y + reach) && !rises; ++ny)
-                        for (int nx = std::max(0, x - reach); nx <= std::min(w - 1, x + reach) && !rises; ++nx)
-                        {
-                            auto const it = tops.find(nx + ny * w);
-                            if (it != tops.end())
-                                for (int top : it->second)
-                                    rises = rises || std::abs(top - int(span->smax)) > climb;
-                        }
-                    span->area = rises ? steep : ground;
-                }
-            }
     }
 
     TileBuilder::TileBuilder(MapBuilder* mapBuilder, bool skipLiquid, bool debugOutput) :
@@ -1054,13 +949,11 @@ namespace MMAP
                     rcClearUnwalkableTriangles(m_rcContext, tileCfg.walkableSlopeAngle, tVerts, tVertCount, tTris, tTriCount, triFlags);
                     // mod_playerbots (bots should not attempt to use paths that includes slopes beyound 50 degrees)
                     // A steep face that rises no more than one step is a step: rasterArea puts the tag below plain
-                    // ground, so the cell where the face meets plain ground stays plain ground; restoreSteepFaces
-                    // gives such cells back to the tag where they rise above one step.
+                    // ground, so the cell where the face meets plain ground stays plain ground.
                     modAlmostUnwalkableTriangles(50.0f, tVerts, tVertCount, tTris, tTriCount, triFlags);
                     for (int i = 0; i < tTriCount; ++i)
                         triFlags[i] = rasterArea(triFlags[i]);
                     rcRasterizeTriangles(m_rcContext, tVerts, tVertCount, tTris, triFlags, tTriCount, *tile.solid, config.walkableClimb);
-                    restoreSteepFaces(m_rcContext, tVerts, tVertCount, tTris, triFlags, tTriCount, tileCfg, config.walkableClimb, *tile.solid);
                     delete[] triFlags;
 
                     rcFilterLowHangingWalkableObstacles(m_rcContext, config.walkableClimb, *tile.solid);
