@@ -182,6 +182,14 @@ dtNavMeshQuery const* MMapData::GetNavMeshQuery()
     return _navMeshQuery.get();
 }
 
+dtNavMeshQuery const* MMapData::GetWideNavMeshQuery()
+{
+    if (_navMesh && !_wideNavMeshQuery)
+        _wideNavMeshQuery = MMAP::MMapMgr::CreateNavMeshQuery(_navMesh.get(), MMAP::WIDE_SEARCH_NODES);
+
+    return _wideNavMeshQuery.get();
+}
+
 dtNavMeshQuery const* MMapData::GetVesselNavMeshQuery(uint32 displayId, std::shared_ptr<dtNavMesh const> const& navMesh)
 {
     if (!navMesh)

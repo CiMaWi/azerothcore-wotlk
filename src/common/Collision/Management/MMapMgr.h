@@ -49,6 +49,10 @@ namespace MMAP
     static char const* const TILE_FILE_NAME_FORMAT = "{}/mmaps/{:03}{:02}{:02}.mmtile";
     // a vessel's tile: one navmesh per collision model (display id), written by mmaps_generator --vessels
     static char const* const VESSEL_TILE_FILE_NAME_FORMAT = "{}/mmaps/vessels/{:05}.mmtile";
+    // The node pool of the wide query (PathGenerator::SetWideSearch), Detour's largest: a search of 1,024 nodes
+    // runs out on a long walk the mesh joins, and no smaller pool carried more of them (pathing PA4's
+    // sweep, 911 legs: 4,096 70 %, 16,384 92 %, 32,768 97 %, 65,535 98.7 %). About 2.8 MB a query.
+    constexpr uint16 WIDE_SEARCH_NODES = 65535;
 
     struct NavMeshDeleter
     {
@@ -70,7 +74,9 @@ namespace MMAP
 
         static std::shared_ptr<dtNavMesh> LoadNavMesh(uint32 mapId);
         static bool LoadTile(dtNavMesh* navMesh, uint32 mapId, int32 x, int32 y);
-        static ManagedNavMeshQuery CreateNavMeshQuery(dtNavMesh const* navMesh);
+        // A query on navMesh with a node pool of maxNodes (Detour's limit, at most 65,535): the map's query keeps
+        // 1,024, the wide one (MMapData::GetWideNavMeshQuery) WIDE_SEARCH_NODES.
+        static ManagedNavMeshQuery CreateNavMeshQuery(dtNavMesh const* navMesh, uint16 maxNodes = 1024);
 
         // The deck's navmesh of a vessel (a transport's collision model), in the model's own coordinates: for a
         // transport of size 1 a mesh point is a passenger offset. One mesh per display id for the whole server,
