@@ -435,9 +435,8 @@ void Map::UpdatePlayerZoneStats(uint32 oldZone, uint32 newZone)
         ++_zonePlayerCountMap[newZone];
 }
 
-// Names of the map_section_us sections in MapUpdateSection order; LightweightPerf::MapSectionInShortTick says whether
-// a short tick (t_diff == 0) runs them. Both tables are positional: a new MapUpdateSection entry needs a name and a
-// short-tick flag at the same index.
+// Names of the map_section_us sections in MapUpdateSection order. The table is positional: a new MapUpdateSection
+// entry needs a name at the same index.
 static constexpr char const* MapSectionNames[] =
 {
     "sessions", "player_update", "events", "respawns", "mark_cells", "non_player_objects", "send_object_updates",
@@ -445,30 +444,25 @@ static constexpr char const* MapSectionNames[] =
 };
 static_assert(sizeof(MapSectionNames) / sizeof(MapSectionNames[0]) == MAX_MAP_SECTIONS,
     "MapSectionNames must name every MapUpdateSection");
-static_assert(LightweightPerf::MapSectionInShortTick.size() == MAX_MAP_SECTIONS,
-    "MapSectionInShortTick must flag every MapUpdateSection");
 static_assert(MAP_SECTION_DELAYED_VISIBILITY == 9 && MAP_SECTION_REST == 10,
-    "MapSectionNames and MapSectionInShortTick follow the MapUpdateSection order");
+    "MapSectionNames follows the MapUpdateSection order");
 
 // Sends this map update's section times (us) and counters, one value each; only when Map::Update armed the stats.
-static void SendMapSectionStats(uint32 mapId, uint32 players, bool full)
+static void SendMapSectionStats(uint32 mapId, uint32 players)
 {
     MapSectionStats& stats = mapSectionStats;
     static_assert(MAX_MAP_SECTIONS == LightweightPerf::MapSectionCount);
-    LightweightPerf::RecordMapSections(stats.sectionNs, full, players, stats.playerUpdates);
+    LightweightPerf::RecordMapSections(stats.sectionNs, players, stats.playerUpdates);
     if (!stats.on)
         return;
 
     stats.on = false;
     std::string const id = std::to_string(mapId);
-    std::string const fullTag = full ? "1" : "0";
     for (uint8 i = 0; i < MAX_MAP_SECTIONS; ++i)
     {
-        if (!full && !LightweightPerf::MapSectionInShortTick[i])
-            continue;
-
+        // Every map update is a full one; the tag stays for the reports that read it.
         METRIC_VALUE("map_section_us", uint64((stats.sectionNs[i] + 500) / 1000), METRIC_TAG("map_id", id),
-            METRIC_TAG("section", MapSectionNames[i]), METRIC_TAG("full", fullTag));
+            METRIC_TAG("section", MapSectionNames[i]), METRIC_TAG("full", "1"));
     }
 
     METRIC_VALUE("map_counter", uint64(players), METRIC_TAG("map_id", id), METRIC_TAG("counter", "players"));
@@ -511,27 +505,11 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
             MapSessionFilter updater(session);
             session->Update(s_diff, updater);
             clock.Lap(MAP_SECTION_SESSIONS);
-
-            // update players at tick
-            if (!t_diff)
-            {
-                player->Update(s_diff);
-                ++mapSectionStats.playerUpdates;
-                clock.Lap(MAP_SECTION_PLAYER_UPDATE);
-            }
         }
     }
 
     Events.Update(t_diff);
     clock.Lap(MAP_SECTION_EVENTS);
-
-    if (!t_diff)
-    {
-        HandleDelayedVisibility();
-        clock.Lap(MAP_SECTION_DELAYED_VISIBILITY);
-        SendMapSectionStats(GetId(), players, false);
-        return;
-    }
 
     /// Process any due respawns (non-compatibility mode spawns)
     if (!sWorld->getBoolConfig(CONFIG_RESPAWN_FORCE_COMPATIBILITY_MODE))
@@ -620,7 +598,7 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
         METRIC_TAG("map_id", std::to_string(GetId())),
         METRIC_TAG("map_instanceid", std::to_string(GetInstanceId())));
 
-    SendMapSectionStats(GetId(), players, true);
+    SendMapSectionStats(GetId(), players);
 }
 
 void Map::UpdateNonPlayerObjects(uint32 const diff)

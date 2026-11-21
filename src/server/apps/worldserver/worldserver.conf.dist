@@ -1351,7 +1351,10 @@ Visibility.ObjectQuestMarkers = 1
 # MAPS
 #
 #    MapUpdateInterval
-#        Description: Time (milliseconds) for map update interval.
+#        Description: Minimum time (milliseconds) between two updates of the maps. Every map
+#                     updates once per world tick, sessions and players included, as soon as
+#                     this time has passed since the last map update: a loaded server updates
+#                     every map on every world tick.
 #        Default:     10 - (0.01 second)
 
 MapUpdateInterval = 10

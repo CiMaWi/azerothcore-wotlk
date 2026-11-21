@@ -49,9 +49,6 @@ enum WorldPhase : std::size_t
 };
 
 constexpr std::size_t MapSectionCount = 11;
-// Whether a short tick (map diff 0) runs each map section, in MapUpdateSection order (Map.cpp checks the order).
-constexpr std::array<bool, MapSectionCount> MapSectionInShortTick = {true,  true,  true,  false, false, false,
-                                                                     false, false, false, true,  false};
 
 enum MapRow : std::size_t
 {
@@ -75,7 +72,7 @@ bool Enabled();
 void Configure(bool enabled);
 std::uint64_t QueuedAt();
 void SetMapQueuedAt(std::uint64_t queuedAt);
-void RecordMapSections(std::uint64_t const* sections, bool full, std::uint32_t players, std::uint32_t playerUpdates);
+void RecordMapSections(std::uint64_t const* sections, std::uint32_t players, std::uint32_t playerUpdates);
 // World thread only: it reads the world update-time table, whose percentiles sort it without a lock.
 std::string Snapshot(bool reset, bool metricsEnabled);
 
@@ -83,7 +80,7 @@ std::string Snapshot(bool reset, bool metricsEnabled);
 class MapScope
 {
 public:
-    MapScope(std::uint32_t mapId, bool full);
+    explicit MapScope(std::uint32_t mapId);
     ~MapScope();
     MapScope(MapScope const&) = delete;
     MapScope& operator=(MapScope const&) = delete;
@@ -92,7 +89,6 @@ public:
 
 private:
     bool _on;
-    bool _full;
     bool _cpuValid = false;
     std::uint32_t _mapId;
     std::uint64_t _epoch = 0;
