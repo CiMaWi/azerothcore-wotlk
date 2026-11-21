@@ -605,7 +605,7 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
 // Files an object of the update list under the reason that keeps it there, for the perf sample. The reasons are
 // those of Creature::IsUpdateNeeded and GameObject::IsUpdateNeeded, with what players see or stand near filed first;
 // an object kept by a rule added there and not here counts as leaving.
-static LightweightPerf::ObjectKind ObjectKindOf(Map* map, WorldObject* obj)
+static LightweightPerf::ObjectKind ObjectKindOf(WorldObject* obj, bool cell)
 {
     using namespace LightweightPerf;
     bool const seen = !obj->GetObjectVisibilityContainer().GetVisiblePlayersMap().empty();
@@ -613,7 +613,7 @@ static LightweightPerf::ObjectKind ObjectKindOf(Map* map, WorldObject* obj)
     {
         if (seen)
             return CreatureSeen;
-        if (map->isCellMarked(creature->GetCurrentCell().GetCellCoord().GetId()))
+        if (cell)
             return CreatureCell;
         if (creature->isActiveObject())
             return CreatureActive;
@@ -634,7 +634,7 @@ static LightweightPerf::ObjectKind ObjectKindOf(Map* map, WorldObject* obj)
     {
         if (seen)
             return GameObjectSeen;
-        if (map->isCellMarked(gameObject->GetCurrentCell().GetCellCoord().GetId()))
+        if (cell)
             return GameObjectCell;
         if (gameObject->isActiveObject())
             return GameObjectActive;
@@ -657,6 +657,15 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
         // The recheck pass is also the perf sample: only here are the cells near players marked, and one pass in
         // 30 s costs nothing
         bool const sampled = LightweightPerf::MapTimed();
+        // An object's current cell is open to Map only
+        auto const cellMarked = [this](WorldObject* obj)
+        {
+            if (Creature* creature = obj->ToCreature())
+                return isCellMarked(creature->GetCurrentCell().GetCellCoord().GetId());
+            if (GameObject* gameObject = obj->ToGameObject())
+                return isCellMarked(gameObject->GetCurrentCell().GetCellCoord().GetId());
+            return false;
+        };
         std::array<LightweightPerf::Row, LightweightPerf::ObjectKindCount> kinds{};
         for (uint32 i = 0; i < _updatableObjectList.size();)
         {
@@ -669,7 +678,7 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
 
             if (sampled)
             {
-                LightweightPerf::ObjectKind const kind = ObjectKindOf(this, obj);
+                LightweightPerf::ObjectKind const kind = ObjectKindOf(obj, cellMarked(obj));
                 auto const start = std::chrono::steady_clock::now();
                 obj->Update(diff);
                 kinds[kind].Add(std::chrono::duration_cast<std::chrono::nanoseconds>(
