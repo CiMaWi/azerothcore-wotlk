@@ -771,6 +771,7 @@ void Player::RewardQuest(Quest const* quest, uint32 reward, Object* questGiver, 
     {
         sScriptMgr->OnPlayerGiveXP(this, XP, nullptr, isLFGReward ? PlayerXPSource::XPSOURCE_QUEST_DF : PlayerXPSource::XPSOURCE_QUEST);
         GiveXP(XP, nullptr, 1.0f, isLFGReward);
+        sScriptMgr->OnPlayerAfterGiveQuestXP(this, quest, XP, isLFGReward ? PlayerXPSource::XPSOURCE_QUEST_DF : PlayerXPSource::XPSOURCE_QUEST);
     }
 
     // Give player extra money if GetRewOrReqMoney > 0 and get ReqMoney if negative

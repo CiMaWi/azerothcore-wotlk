@@ -123,6 +123,7 @@ void WorldSession::HandleMoveWorldportAck()
         return;
     }
 
+    sScriptMgr->OnPlayerAfterWorldport(GetPlayer(), oldMap->GetId());
     oldMap->AfterPlayerUnlinkFromMap();
 
     // pussywizard: transport teleport couldn't teleport us to the same map (some other teleport pending, reqs not met, etc.), but we still have transport set until player moves! clear it if map differs (crashfix)

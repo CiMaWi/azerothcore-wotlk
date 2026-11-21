@@ -1009,6 +1009,26 @@ void ScriptMgr::OnPlayerAfterTrainSpell(Player* player, Creature* trainer, uint3
     CALL_ENABLED_HOOKS(PlayerScript, PLAYERHOOK_ON_AFTER_TRAIN_SPELL, script->OnPlayerAfterTrainSpell(player, trainer, spellId));
 }
 
+void ScriptMgr::OnPlayerAfterGiveQuestXP(Player* player, Quest const* quest, uint32 xp, uint8 xpSource)
+{
+    CALL_ENABLED_HOOKS(PlayerScript, PLAYERHOOK_ON_AFTER_GIVE_QUEST_XP, script->OnPlayerAfterGiveQuestXP(player, quest, xp, xpSource));
+}
+
+void ScriptMgr::OnPlayerBeforeTrainSpell(Player* player, Creature* trainer, uint32 spellId, int32 cost)
+{
+    CALL_ENABLED_HOOKS(PlayerScript, PLAYERHOOK_ON_BEFORE_TRAIN_SPELL, script->OnPlayerBeforeTrainSpell(player, trainer, spellId, cost));
+}
+
+void ScriptMgr::OnPlayerAfterWorldport(Player* player, uint32 oldMapId)
+{
+    CALL_ENABLED_HOOKS(PlayerScript, PLAYERHOOK_ON_AFTER_WORLDPORT, script->OnPlayerAfterWorldport(player, oldMapId));
+}
+
+void ScriptMgr::OnPlayerBeforeSwapItem(Player* player, Item* srcItem, Item* dstItem, uint16 src, uint16 dst)
+{
+    CALL_ENABLED_HOOKS(PlayerScript, PLAYERHOOK_ON_BEFORE_SWAP_ITEM, script->OnPlayerBeforeSwapItem(player, srcItem, dstItem, src, dst));
+}
+
 PlayerScript::PlayerScript(char const* name, std::vector<uint16> enabledHooks)
     : ScriptObject(name, PLAYERHOOK_END)
 {
