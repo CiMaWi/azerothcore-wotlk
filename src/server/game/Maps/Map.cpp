@@ -609,12 +609,11 @@ static LightweightPerf::ObjectKind ObjectKindOf(Map* map, WorldObject* obj)
 {
     using namespace LightweightPerf;
     bool const seen = !obj->GetObjectVisibilityContainer().GetVisiblePlayersMap().empty();
-    bool const cell = map->isCellMarked(obj->GetCurrentCell().GetCellCoord().GetId());
     if (Creature* creature = obj->ToCreature())
     {
         if (seen)
             return CreatureSeen;
-        if (cell)
+        if (map->isCellMarked(creature->GetCurrentCell().GetCellCoord().GetId()))
             return CreatureCell;
         if (creature->isActiveObject())
             return CreatureActive;
@@ -635,7 +634,7 @@ static LightweightPerf::ObjectKind ObjectKindOf(Map* map, WorldObject* obj)
     {
         if (seen)
             return GameObjectSeen;
-        if (cell)
+        if (map->isCellMarked(gameObject->GetCurrentCell().GetCellCoord().GetId()))
             return GameObjectCell;
         if (gameObject->isActiveObject())
             return GameObjectActive;
