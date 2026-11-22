@@ -1367,6 +1367,18 @@ MapUpdateInterval = 10
 MapUpdate.Threads = 1
 
 #
+#    MapUpdate.UnseenCreatureInterval
+#        Description: Time (milliseconds) between two updates of a creature on a map's update list
+#                     that no player sees and that has nothing of its own to do (no combat, no
+#                     waypoint path, not active, not a summon, not evading, not in a formation, not
+#                     a trigger). It is given the whole time that passed. Seen creatures, game
+#                     objects and dynamic objects update with every map update.
+#        Default:     1000 - (1 second)
+#                     0    - (Every map update)
+
+MapUpdate.UnseenCreatureInterval = 1000
+
+#
 #    MoveMaps.Enable
 #        Description: Enable/Disable pathfinding using mmaps - recommended.
 #        Default:     0 - (Disabled)

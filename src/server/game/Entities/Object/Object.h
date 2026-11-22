@@ -476,6 +476,9 @@ private:
 private:
     std::size_t _mapUpdateListOffset;
     UpdateState _mapUpdateState;
+    // The map time an unseen creature has not been given yet, because it updates at most once per
+    // MapUpdate.UnseenCreatureInterval. Kept only while the object is on the map's update list
+    uint32 _pendingUpdateDiff = 0;
 };
 
 class WorldObject : public Object, public WorldLocation

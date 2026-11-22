@@ -649,6 +649,8 @@ private:
 
     void _AddObjectToUpdateList(WorldObject* obj);
     void _RemoveObjectFromUpdateList(WorldObject* obj);
+    // Whether an object of the update list updates on this pass, and with which diff
+    static bool TakeUpdateDiff(WorldObject* obj, uint32 diff, uint32 unseenInterval, uint32& updateDiff);
 
     std::unordered_map<ObjectGuid::LowType /*dbGUID*/, time_t> _creatureRespawnTimes;
     std::unordered_set<ObjectGuid::LowType> _forcedCreatureRespawns;
