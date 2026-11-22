@@ -4001,16 +4001,34 @@ std::string Creature::GetDebugInfo() const
 // Note: This is called in a tight (heavy) loop, is it critical that all checks are FAST and are hopefully only simple conditionals.
 bool Creature::IsUpdateNeeded()
 {
-    if (WorldObject::IsUpdateNeeded())
-        return true;
-
     if (GetMap()->isCellMarked(GetCurrentCell().GetCellCoord().GetId()))
         return true;
 
-    if (IsInCombat())
+    if (!GetObjectVisibilityContainer().GetVisiblePlayersMap().empty())
         return true;
 
+    return HasOwnUpdateReason();
+}
+
+// Note: called in the same tight loop, every pass for a creature that is not seen
+bool Creature::NeedsEveryMapUpdate()
+{
     if (!GetObjectVisibilityContainer().GetVisiblePlayersMap().empty())
+        return true;
+
+    // A trigger may act on players without being seen
+    if (IsTrigger())
+        return true;
+
+    return HasOwnUpdateReason();
+}
+
+bool Creature::HasOwnUpdateReason()
+{
+    if (WorldObject::IsUpdateNeeded())
+        return true;
+
+    if (IsInCombat())
         return true;
 
     if (ToTempSummon())

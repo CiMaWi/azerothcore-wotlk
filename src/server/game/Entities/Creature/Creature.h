@@ -458,6 +458,11 @@ public:
     std::string GetDebugInfo() const override;
 
     bool IsUpdateNeeded() override;
+    // The reasons of IsUpdateNeeded that hold with no player near: they keep the creature on the update list
+    bool HasOwnUpdateReason();
+    // A creature on the update list that is not seen and has no such reason updates at most once per
+    // MapUpdate.UnseenCreatureInterval
+    bool NeedsEveryMapUpdate();
 
 protected:
     bool CreateFromProto(ObjectGuid::LowType guidlow, uint32 Entry, uint32 vehId, CreatureData const* data = nullptr);
