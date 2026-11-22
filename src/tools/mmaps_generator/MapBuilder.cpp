@@ -80,6 +80,174 @@ namespace MMAP
         return area == 1 ? static_cast<unsigned char>(NAV_GROUND_STEEP) : static_cast<unsigned char>(area >> 1);
     }
 
+    // The marked areas of a map that meet a tile's bounds (Recast order: world y, z, x) widened by `pad`: the walkable
+    // ones, or the blocked and plain ones.
+    static std::vector<Config::MarkedArea const*> markedAreasIn(std::vector<Config::MarkedArea> const& areas,
+                                                                 uint32 mapID, float const* bmin, float const* bmax,
+                                                                 float pad, bool walkable)
+    {
+        std::vector<Config::MarkedArea const*> found;
+        for (Config::MarkedArea const& area : areas)
+        {
+            if (area.mapId != mapID || (area.kind == Config::MarkedAreaKind::Walkable) != walkable)
+                continue;
+            if (area.maxX < bmin[2] - pad || area.minX > bmax[2] + pad || area.maxY < bmin[0] - pad ||
+                area.minY > bmax[0] + pad || area.maxZ < bmin[1] || area.minZ > bmax[1])
+                continue;
+            found.push_back(&area);
+        }
+        return found;
+    }
+
+    // The source triangles whose centroid lies in a walkable area: they become ground before they are rasterized, also
+    // where the slope rule dropped them or tagged them steep (Recast's marking after rasterization reaches only the
+    // ground the slope rule kept).
+    static std::vector<int> walkableTriangles(std::vector<Config::MarkedArea const*> const& areas, float const* verts,
+                                              int const* tris, int nt)
+    {
+        std::vector<int> marked;
+        if (areas.empty())
+            return marked;
+
+        for (int i = 0; i < nt; ++i)
+        {
+            float c[3] = { 0.0f, 0.0f, 0.0f };
+            for (int k = 0; k < 3; ++k)
+                rcVadd(c, c, &verts[tris[i * 3 + k] * 3]);
+            for (Config::MarkedArea const* area : areas)
+            {
+                if (area->Contains(c[2] / 3.0f, c[0] / 3.0f, c[1] / 3.0f))
+                {
+                    marked.push_back(i);
+                    break;
+                }
+            }
+        }
+        return marked;
+    }
+
+    // The area holding a heightfield cell's centre and a floor `top` cells high; the last one if several do
+    static Config::MarkedArea const* cellArea(std::vector<Config::MarkedArea const*> const& areas, float const* bmin,
+                                              float cs, float ch, int x, int y, int top)
+    {
+        float const worldX = bmin[2] + (y + 0.5f) * cs;
+        float const worldY = bmin[0] + (x + 0.5f) * cs;
+        float const worldZ = bmin[1] + top * ch;
+        for (auto it = areas.rbegin(); it != areas.rend(); ++it)
+            if ((*it)->Contains(worldX, worldY, worldZ))
+                return *it;
+        return nullptr;
+    }
+
+    // Recast's ledge filter drops a span whose reachable neighbours' floors spread more than walkableClimb: a ramp
+    // steeper than atan(walkableClimb * ch / (2 * cs)), 63.4 degrees along a grid axis at climb 4 (70.5 diagonally).
+    // Inside a walkable area the spans keep their area, so the area carries a ramp until neighbouring floors part by
+    // more than walkableClimb (76 degrees along an axis), where the compact heightfield joins them no more.
+    static void filterLedgeSpans(rcContext* ctx, std::vector<Config::MarkedArea const*> const& walkable,
+                                 int walkableHeight, int walkableClimb, rcHeightfield& hf)
+    {
+        std::vector<std::pair<rcSpan*, unsigned char>> kept;
+        if (!walkable.empty())
+            for (int y = 0; y < hf.height; ++y)
+                for (int x = 0; x < hf.width; ++x)
+                    for (rcSpan* span = hf.spans[x + y * hf.width]; span; span = span->next)
+                        if (span->area != RC_NULL_AREA &&
+                            cellArea(walkable, hf.bmin, hf.cs, hf.ch, x, y, int(span->smax)))
+                            kept.emplace_back(span, span->area);
+        rcFilterLedgeSpans(ctx, walkableHeight, walkableClimb, hf);
+        for (auto const& [span, area] : kept)
+            span->area = area;
+    }
+
+    // Blocked and plain, cell by cell on the compact heightfield before the erosion, so they end at the area's edge and
+    // the erosion keeps a bot's radius off a blocked edge: blocked takes every span (liquid too), plain turns the steep
+    // tag into ground.
+    static void markCells(std::vector<Config::MarkedArea const*> const& areas, rcCompactHeightfield& chf)
+    {
+        for (int y = 0; y < chf.height; ++y)
+        {
+            for (int x = 0; x < chf.width; ++x)
+            {
+                rcCompactCell const& cell = chf.cells[x + y * chf.width];
+                for (unsigned int i = cell.index, end = cell.index + cell.count; i < end; ++i)
+                {
+                    if (chf.areas[i] == RC_NULL_AREA)
+                        continue;
+                    Config::MarkedArea const* area = cellArea(areas, chf.bmin, chf.cs, chf.ch, x, y, chf.spans[i].y);
+                    if (!area)
+                        continue;
+                    if (area->kind == Config::MarkedAreaKind::Blocked)
+                        chf.areas[i] = RC_NULL_AREA;
+                    else if (area->kind == Config::MarkedAreaKind::Plain &&
+                             chf.areas[i] == rasterArea(NAV_GROUND_STEEP))
+                        chf.areas[i] = rasterArea(NAV_GROUND);
+                }
+            }
+        }
+    }
+
+    // The floor the generator's own steps cut from a tile, in cells of its own area (the border cells excluded,
+    // summed over the sub-tiles of the first build pass): written beside the tile as counts only, the tile's bytes
+    // do not depend on them. Ledge, low ceiling and the low-obstacle gain count solid spans; radius (the erosion by
+    // walkableRadius) and small region (regions under minRegionArea) also count liquid spans.
+    struct TileCuts
+    {
+        long long raster = 0;      // walkable spans after rasterizing the solid triangles
+        long long lowObstacle = 0; // made walkable by rcFilterLowHangingWalkableObstacles (a gain)
+        long long ledge = 0;       // rcFilterLedgeSpans
+        long long lowCeiling = 0;  // rcFilterWalkableLowHeightSpans
+        long long compact = 0;     // walkable spans of the compact heightfield (solid and liquid)
+        long long radius = 0;      // rcErodeWalkableArea
+        long long smallRegion = 0; // rcBuildRegions: walkable spans left without a region
+    };
+
+    // <tile file>.cuts.json beside the tile; a tile without the file was built before the counts existed
+    static void writeTileCuts(std::string const& tileFileName, uint32 mapID, uint32 tileX, uint32 tileY, float cellSize,
+                              TileCuts const& cuts)
+    {
+        std::string const cutsFileName = tileFileName.substr(0, tileFileName.rfind('.')) + ".cuts.json";
+        FILE* file = fopen(cutsFileName.c_str(), "wb");
+        if (!file)
+        {
+            printf("[Map %03u] Failed to open %s for writing!\n", mapID, cutsFileName.c_str());
+            return;
+        }
+        fprintf(file,
+                "{\"map\":%u,\"tileX\":%u,\"tileY\":%u,\"cellSize\":%.6f,\"cells\":{\"raster\":%lld,"
+                "\"lowObstacle\":%lld,\"ledge\":%lld,\"lowCeiling\":%lld,\"compact\":%lld,\"radius\":%lld,"
+                "\"smallRegion\":%lld}}\n",
+                mapID, tileX, tileY, cellSize, cuts.raster, cuts.lowObstacle, cuts.ledge, cuts.lowCeiling, cuts.compact,
+                cuts.radius, cuts.smallRegion);
+        fclose(file);
+    }
+
+    static long long walkableSpans(rcHeightfield const& hf, int border)
+    {
+        long long n = 0;
+        for (int y = border; y < hf.height - border; ++y)
+            for (int x = border; x < hf.width - border; ++x)
+                for (rcSpan const* span = hf.spans[x + y * hf.width]; span; span = span->next)
+                    if (span->area != RC_NULL_AREA)
+                        ++n;
+        return n;
+    }
+
+    static long long walkableSpans(rcCompactHeightfield const& chf, int border, bool withoutRegion)
+    {
+        long long n = 0;
+        for (int y = border; y < chf.height - border; ++y)
+        {
+            for (int x = border; x < chf.width - border; ++x)
+            {
+                rcCompactCell const& cell = chf.cells[x + y * chf.width];
+                for (unsigned int i = cell.index, end = cell.index + cell.count; i < end; ++i)
+                    if (chf.areas[i] != RC_NULL_AREA && (!withoutRegion || chf.spans[i].reg == 0))
+                        ++n;
+            }
+        }
+        return n;
+    }
+
     TileBuilder::TileBuilder(MapBuilder* mapBuilder, bool skipLiquid, bool debugOutput) :
             m_debugOutput(debugOutput),
             m_mapBuilder(mapBuilder),
@@ -892,6 +1060,20 @@ namespace MMAP
             subTilesY = std::max(1, int(std::ceil((bmax[2] - bmin[2]) / subTileSize)));
         }
 
+        // the marked areas of the tile (none for a vessel): walkable by source triangle and in the ledge filter,
+        // blocked and plain by cell
+        std::vector<Config::MarkedArea const*> walkableAreas;
+        std::vector<Config::MarkedArea const*> cellAreas;
+        if (!vesselDisplayId)
+        {
+            std::vector<Config::MarkedArea> const& areas = m_mapBuilder->getConfig().MarkedAreas();
+            float const pad = config.borderSize * config.cs;
+            walkableAreas = markedAreasIn(areas, mapID, config.bmin, config.bmax, pad, true);
+            cellAreas = markedAreasIn(areas, mapID, config.bmin, config.bmax, pad, false);
+        }
+        std::vector<int> const walkableTris = walkableTriangles(walkableAreas, tVerts, tTris, tTriCount);
+        TileCuts cuts;
+
         // Detour links a polygon to another of its tile only below index 0x7fff: it stores the neighbour as
         // index + 1 and reads bit 0x8000 as a border or portal. A merged tile over that many polygons loses links,
         // so it is rebuilt with a larger maxSimplificationError (at least 1.0, then +0.2) until it fits.
@@ -951,14 +1133,36 @@ namespace MMAP
                     // A steep face that rises no more than one step is a step: rasterArea puts the tag below plain
                     // ground, so the cell where the face meets plain ground stays plain ground.
                     modAlmostUnwalkableTriangles(50.0f, tVerts, tVertCount, tTris, tTriCount, triFlags);
+                    for (int tri : walkableTris)
+                        triFlags[tri] = NAV_GROUND;
                     for (int i = 0; i < tTriCount; ++i)
                         triFlags[i] = rasterArea(triFlags[i]);
                     rcRasterizeTriangles(m_rcContext, tVerts, tVertCount, tTris, triFlags, tTriCount, *tile.solid, config.walkableClimb);
                     delete[] triFlags;
 
+                    // the cut counts: walkable spans before and after each of the generator's own filters
+                    bool const countCuts = rebuild == 0;
+                    int const border = tileCfg.borderSize;
+                    long long walkable = countCuts ? walkableSpans(*tile.solid, border) : 0;
+                    cuts.raster += walkable;
+                    auto countCut = [&](long long& cut)
+                    {
+                        if (!countCuts)
+                            return;
+                        long long const now = walkableSpans(*tile.solid, border);
+                        cut += walkable - now;
+                        walkable = now;
+                    };
+
+                    long long lowObstacleLoss = 0;
                     rcFilterLowHangingWalkableObstacles(m_rcContext, config.walkableClimb, *tile.solid);
-                    rcFilterLedgeSpans(m_rcContext, tileCfg.walkableHeight, tileCfg.walkableClimb, *tile.solid);
+                    countCut(lowObstacleLoss);
+                    cuts.lowObstacle -= lowObstacleLoss;
+                    filterLedgeSpans(m_rcContext, walkableAreas, tileCfg.walkableHeight, tileCfg.walkableClimb,
+                                     *tile.solid);
+                    countCut(cuts.ledge);
                     rcFilterWalkableLowHeightSpans(m_rcContext, tileCfg.walkableHeight, *tile.solid);
+                    countCut(cuts.lowCeiling);
 
                     // add liquid triangles
                     rcRasterizeTriangles(m_rcContext, lVerts, lVertCount, lTris, lTriFlags, lTriCount, *tile.solid, config.walkableClimb);
@@ -971,12 +1175,20 @@ namespace MMAP
                         continue;
                     }
 
+                    if (!cellAreas.empty())
+                        markCells(cellAreas, *tile.chf);
+
+                    long long const compact = countCuts ? walkableSpans(*tile.chf, border, false) : 0;
+                    cuts.compact += compact;
+
                     // build polymesh intermediates
                     if (!rcErodeWalkableArea(m_rcContext, config.walkableRadius, *tile.chf))
                     {
                         printf("%s Failed eroding area!                    \n", tileString);
                         continue;
                     }
+                    if (countCuts)
+                        cuts.radius += compact - walkableSpans(*tile.chf, border, false);
 
                     if (!rcBuildDistanceField(m_rcContext, *tile.chf))
                     {
@@ -989,6 +1201,8 @@ namespace MMAP
                         printf("%s Failed building regions!                \n", tileString);
                         continue;
                     }
+                    if (countCuts)
+                        cuts.smallRegion += walkableSpans(*tile.chf, border, true);
 
                     tile.cset = rcAllocContourSet();
                     if (!tile.cset || !rcBuildContours(m_rcContext, *tile.chf, tileCfg.maxSimplificationError, tileCfg.maxEdgeLen, *tile.cset))
@@ -1219,6 +1433,9 @@ namespace MMAP
             // write data
             fwrite(navData, sizeof(unsigned char), navDataSize, file);
             fclose(file);
+
+            if (!vesselDisplayId)
+                writeTileCuts(fileName, mapID, tileX, tileY, config.cs, cuts);
 
             // now that tile is written to disk, we can unload it
             navMesh->removeTile(tileRef, nullptr, nullptr);

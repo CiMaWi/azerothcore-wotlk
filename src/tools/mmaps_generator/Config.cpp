@@ -16,6 +16,8 @@
  */
 
 #include "Config.h"
+#include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <fkYAML/node.hpp>
 #include "PathCommon.h"
@@ -214,6 +216,87 @@ namespace MMAP
             _offmeshConnections.clear();
         }
 
+        // Marked areas: { place, map, kind: walkable|blocked|plain, box: { x: [a, b], y: [a, b], z: [a, b] } } or
+        // { place, map, kind, outline: [[x, y], ...], z: [a, b] }; an entry that does not read stops the load.
+        _markedAreas.clear();
+        if (mmapsNode.contains("markedAreas") && mmapsNode["markedAreas"].is_sequence())
+        {
+            auto readRange = [](fkyaml::node const& n, char const* key, float& lo, float& hi)
+            {
+                if (!n.contains(key) || !n[key].is_sequence())
+                    return false;
+                std::vector<float> const v = n[key].get_value<std::vector<float>>();
+                if (v.size() != 2)
+                    return false;
+                lo = std::min(v[0], v[1]);
+                hi = std::max(v[0], v[1]);
+                return true;
+            };
+
+            for (fkyaml::node const& areaNode : mmapsNode["markedAreas"].as_seq())
+            {
+                MarkedArea area;
+                std::string kind;
+                tryString(areaNode, "place", area.place);
+                tryString(areaNode, "kind", kind);
+                bool ok = areaNode.contains("map");
+                if (ok)
+                    area.mapId = areaNode["map"].get_value<uint32>();
+                if (kind == "walkable")
+                    area.kind = MarkedAreaKind::Walkable;
+                else if (kind == "blocked")
+                    area.kind = MarkedAreaKind::Blocked;
+                else if (kind == "plain")
+                    area.kind = MarkedAreaKind::Plain;
+                else
+                    ok = false;
+
+                if (ok && areaNode.contains("outline"))
+                {
+                    std::vector<std::vector<float>> const corners =
+                        areaNode["outline"].get_value<std::vector<std::vector<float>>>();
+                    ok = corners.size() >= 3 && readRange(areaNode, "z", area.minZ, area.maxZ);
+                    for (std::size_t i = 0; ok && i < corners.size(); ++i)
+                    {
+                        ok = corners[i].size() == 2;
+                        if (ok)
+                            area.outline.emplace_back(corners[i][0], corners[i][1]);
+                    }
+                    if (ok)
+                    {
+                        area.minX = area.maxX = area.outline[0].first;
+                        area.minY = area.maxY = area.outline[0].second;
+                        for (auto const& [x, y] : area.outline)
+                        {
+                            area.minX = std::min(area.minX, x);
+                            area.maxX = std::max(area.maxX, x);
+                            area.minY = std::min(area.minY, y);
+                            area.maxY = std::max(area.maxY, y);
+                        }
+                    }
+                }
+                else if (ok)
+                {
+                    ok = areaNode.contains("box");
+                    if (ok)
+                    {
+                        fkyaml::node const& box = areaNode["box"];
+                        ok = readRange(box, "x", area.minX, area.maxX) && readRange(box, "y", area.minY, area.maxY) &&
+                             readRange(box, "z", area.minZ, area.maxZ);
+                    }
+                }
+
+                if (!ok)
+                {
+                    printf("Marked area '%s' (map %u, kind '%s'): needs map, kind walkable|blocked|plain and a box "
+                           "{x, y, z} or an outline of 3 or more [x, y] with z\n",
+                           area.place.c_str(), area.mapId, kind.c_str());
+                    return false;
+                }
+                _markedAreas.push_back(std::move(area));
+            }
+        }
+
         std::string dataDirPath;
         tryString(mmapsNode, "dataDir", dataDirPath);
         _dataDir = dataDirPath;
@@ -301,5 +384,24 @@ namespace MMAP
                 _dataDir = execPath;
 
         return true;
+    }
+
+    bool Config::MarkedArea::Contains(float x, float y, float z) const
+    {
+        if (x < minX || x > maxX || y < minY || y > maxY || z < minZ || z > maxZ)
+            return false;
+        if (outline.empty())
+            return true;
+
+        // even-odd rule over the outline's edges
+        bool inside = false;
+        for (std::size_t i = 0, j = outline.size() - 1; i < outline.size(); j = i++)
+        {
+            auto const& [xi, yi] = outline[i];
+            auto const& [xj, yj] = outline[j];
+            if ((yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi)
+                inside = !inside;
+        }
+        return inside;
     }
 }
