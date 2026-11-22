@@ -965,8 +965,11 @@ namespace MMAP
 
                 meshData.offMeshConnectionDirs.append(static_cast<unsigned char>(dir)); // 1 both directions, 0 one way
                 meshData.offMeshConnectionRads.append(size);   // agent radius equivalent
-                meshData.offMeshConnectionsAreas.append((unsigned char)0xFF);
-                meshData.offMeshConnectionsFlags.append((unsigned short)0xFF);
+                // A link is plain ground: the server copies a polygon's area into its flags, and the bots' query
+                // filter (PathGenerator::CreateFilter) excludes NAV_GROUND_STEEP, NAV_MAGMA and NAV_SLIME. The old
+                // 0xFF carried those bits, so no bot took a link; creatures and players include ground too.
+                meshData.offMeshConnectionsAreas.append(static_cast<unsigned char>(NAV_GROUND));
+                meshData.offMeshConnectionsFlags.append(static_cast<unsigned short>(NAV_GROUND));
             }
         }
     }
