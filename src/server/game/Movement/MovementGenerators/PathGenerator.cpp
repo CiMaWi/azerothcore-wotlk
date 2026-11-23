@@ -188,6 +188,16 @@ PathGenerator::~PathGenerator()
 {
 }
 
+void PathGenerator::SetWideSearch(bool wide)
+{
+    if (IsVesselSearch())
+        return;
+
+    MMapData& mmapData = _source->GetMap()->GetMapCollisionData().GetMMapData();
+    if (dtNavMeshQuery const* query = wide ? mmapData.GetWideNavMeshQuery() : mmapData.GetNavMeshQuery())
+        _navMeshQuery = query;
+}
+
 bool PathGenerator::CalculatePath(float destX, float destY, float destZ, bool forceDest)
 {
     float x, y, z;
@@ -211,6 +221,7 @@ bool PathGenerator::CalculatePath(float x, float y, float z, float destX, float 
     SetStartPosition(start);
 
     _forceDestination = forceDest;
+    _searchStatus = 0;
 
     // Vessel mode is decided at each call: a movement generator keeps its path object over many calls, and its unit
     // boards or leaves between two of them.
@@ -820,6 +831,7 @@ void PathGenerator::BuildPolyPath(G3D::Vector3 const& startPos, G3D::Vector3 con
                 _pathPolyRefs + prefixPolyLength - 1,    // [out] path
                 (int*)&suffixPolyLength,
                 MAX_PATH_LENGTH - prefixPolyLength); // max number of polygons in output path
+            _searchStatus = dtResult;
         }
 
         if (!suffixPolyLength || dtStatusFailed(dtResult))
@@ -923,6 +935,7 @@ void PathGenerator::BuildPolyPath(G3D::Vector3 const& startPos, G3D::Vector3 con
                 _pathPolyRefs,     // [out] path
                 (int*)&_polyLength,
                 MAX_PATH_LENGTH);   // max number of polygons in output path
+            _searchStatus = dtResult;
         }
 
         if (!_polyLength || dtStatusFailed(dtResult))

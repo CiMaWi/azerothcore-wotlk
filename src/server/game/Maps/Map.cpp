@@ -479,6 +479,17 @@ static void SendMapSectionStats(uint32 mapId, uint32 players)
         METRIC_TAG("counter", "create_nosocket"));
 }
 
+// The sample's delayed relocations, timed by mover type with the objects their notifiers visit
+static void SampleDelayedVisibility(std::unordered_set<Unit*>& movers)
+{
+    for (Unit* mover : movers)
+    {
+        LightweightPerf::VisibilityScope scope(true, mover->IsPlayer());
+        mover->ExecuteDelayedUnitRelocationEvent();
+    }
+    movers.clear();
+}
+
 void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
 {
     uint32 const players = m_mapRefMgr.getSize();
@@ -527,6 +538,8 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
     clock.Lap(MAP_SECTION_RESPAWNS);
 
     _updatableObjectListRecheckTimer.Update(t_diff);
+    // The recheck update is also the perf sample (UpdateNonPlayerObjects): only it times unit phases and relocations
+    bool const sample = _updatableObjectListRecheckTimer.Passed() && LightweightPerf::MapTimed();
     resetMarkedCells();
     clock.Lap(MAP_SECTION_MARK_CELLS);
 
@@ -538,7 +551,12 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
         if (!player || !player->IsInWorld())
             continue;
 
-        player->Update(s_diff);
+        {
+            LightweightPerf::UnitScope scope(sample,
+                                             player->IsInCombat() ? LightweightPerf::PlayerFight
+                                                                  : LightweightPerf::PlayerIdle);
+            player->Update(s_diff);
+        }
         ++mapSectionStats.playerUpdates;
         clock.Lap(MAP_SECTION_PLAYER_UPDATE);
 
@@ -580,6 +598,8 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
     MoveAllDynamicObjectsInMoveList();
     clock.Lap(MAP_SECTION_MOVES);
 
+    if (sample)
+        SampleDelayedVisibility(i_objectsForDelayedVisibility);
     HandleDelayedVisibility();
     clock.Lap(MAP_SECTION_DELAYED_VISIBILITY);
 
@@ -646,8 +666,35 @@ static LightweightPerf::ObjectKind ObjectKindOf(WorldObject* obj, bool cell)
     return DynamicObjects;
 }
 
+// A creature on the update list that no player sees and that has no reason of its own to update on every pass
+// updates at most once per MapUpdate.UnseenCreatureInterval, with the map time gathered since its last update
+bool Map::TakeUpdateDiff(WorldObject* obj, uint32 diff, uint32 unseenInterval, uint32& updateDiff)
+{
+    Creature* creature = obj->ToCreature();
+    if (!creature)
+    {
+        // Game objects and dynamic objects update on every pass: a trap can trigger within a second
+        updateDiff = diff;
+        return true;
+    }
+
+    UpdatableMapObject* updatable = creature;
+    uint32 const pending = updatable->_pendingUpdateDiff + diff;
+    if (!unseenInterval || pending >= unseenInterval || creature->NeedsEveryMapUpdate())
+    {
+        updatable->_pendingUpdateDiff = 0;
+        updateDiff = pending;
+        return true;
+    }
+
+    updatable->_pendingUpdateDiff = pending;
+    return false;
+}
+
 void Map::UpdateNonPlayerObjects(uint32 const diff)
 {
+    uint32 const unseenInterval = sWorld->getIntConfig(CONFIG_MAP_UPDATE_UNSEEN_CREATURE_INTERVAL);
+
     for (WorldObject* obj : _pendingAddUpdatableObjectList)
         _AddObjectToUpdateList(obj);
     _pendingAddUpdatableObjectList.clear();
@@ -676,16 +723,31 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
                 continue;
             }
 
-            if (sampled)
+            uint32 updateDiff = 0;
+            bool updated = TakeUpdateDiff(obj, diff, unseenInterval, updateDiff);
+            // A creature that leaves the list first gets the time it gathered on it (interval 0: all it has)
+            if (!updated && !obj->IsUpdateNeeded())
+                updated = TakeUpdateDiff(obj, 0, 0, updateDiff);
+
+            // The sample times updated objects only, so it shows what the skipped ones no longer cost
+            if (updated && sampled)
             {
                 LightweightPerf::ObjectKind const kind = ObjectKindOf(obj, cellMarked(obj));
                 auto const start = std::chrono::steady_clock::now();
-                obj->Update(diff);
+                if (kind == LightweightPerf::CreatureSeen)
+                {
+                    LightweightPerf::UnitScope scope(true, obj->ToCreature()->IsInCombat()
+                                                               ? LightweightPerf::CreatureFight
+                                                               : LightweightPerf::CreatureIdle);
+                    obj->Update(updateDiff);
+                }
+                else
+                    obj->Update(updateDiff);
                 kinds[kind].Add(std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - start).count());
             }
-            else
-                obj->Update(diff);
+            else if (updated)
+                obj->Update(updateDiff);
 
             if (!obj->IsUpdateNeeded())
             {
@@ -708,7 +770,9 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
             if (!obj->IsInWorld())
                 continue;
 
-            obj->Update(diff);
+            uint32 updateDiff = 0;
+            if (TakeUpdateDiff(obj, diff, unseenInterval, updateDiff))
+                obj->Update(updateDiff);
         }
     }
 }
@@ -734,6 +798,7 @@ void Map::_AddObjectToUpdateList(WorldObject* obj)
 
     mapUpdatableObject->SetUpdateState(UpdatableMapObject::UpdateState::Updating);
     mapUpdatableObject->SetMapUpdateListOffset(_updatableObjectList.size());
+    mapUpdatableObject->_pendingUpdateDiff = 0;
     _updatableObjectList.push_back(obj);
 }
 
@@ -751,6 +816,7 @@ void Map::_RemoveObjectFromUpdateList(WorldObject* obj)
 
     _updatableObjectList.pop_back();
     mapUpdatableObject->SetUpdateState(UpdatableMapObject::UpdateState::NotUpdating);
+    mapUpdatableObject->_pendingUpdateDiff = 0;
 }
 
 void Map::RemoveObjectFromMapUpdateList(WorldObject* obj)

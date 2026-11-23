@@ -22,6 +22,7 @@
 #include "CreatureAI.h"
 #include "CreatureAISelector.h"
 #include "CreatureGroups.h"
+#include "LightweightPerf.h"
 #include "MoveSpline.h"
 #include "DatabaseEnv.h"
 #include "Formulas.h"
@@ -892,6 +893,7 @@ void Creature::Update(uint32 diff)
                 }
             }
 
+            LightweightPerf::UnitLap(LightweightPerf::PhaseRest);
             if (!IsInEvadeMode() && IsAIEnabled)
             {
                 // do not allow the AI to be changed during update
@@ -899,6 +901,7 @@ void Creature::Update(uint32 diff)
                 i_AI->UpdateAI(diff);
                 m_AI_locked = false;
             }
+            LightweightPerf::UnitLap(LightweightPerf::PhaseAi);
 
             // creature can be dead after UpdateAI call
             // CORPSE/DEAD state will processed at next tick (in other case death timer will be updated unexpectedly)
@@ -934,6 +937,7 @@ void Creature::Update(uint32 diff)
 
                 m_regenTimer += CREATURE_REGEN_INTERVAL;
             }
+            LightweightPerf::UnitLap(LightweightPerf::PhaseRegen);
 
             // Evade timer is now handled by CombatManager::Update() which calls UnitAI::EvadeTimerExpired()
             break;
@@ -965,7 +969,9 @@ void Creature::Update(uint32 diff)
                 m_transportCheckTimer -= diff;
         }
 
+        LightweightPerf::UnitLap(LightweightPerf::PhaseRest);
         sScriptMgr->OnCreatureUpdate(this, diff);
+        LightweightPerf::UnitLap(LightweightPerf::PhaseHooks);
     }
 }
 
@@ -3995,16 +4001,34 @@ std::string Creature::GetDebugInfo() const
 // Note: This is called in a tight (heavy) loop, is it critical that all checks are FAST and are hopefully only simple conditionals.
 bool Creature::IsUpdateNeeded()
 {
-    if (WorldObject::IsUpdateNeeded())
-        return true;
-
     if (GetMap()->isCellMarked(GetCurrentCell().GetCellCoord().GetId()))
         return true;
 
-    if (IsInCombat())
+    if (!GetObjectVisibilityContainer().GetVisiblePlayersMap().empty())
         return true;
 
+    return HasOwnUpdateReason();
+}
+
+// Note: called in the same tight loop, every pass for a creature that is not seen
+bool Creature::NeedsEveryMapUpdate()
+{
     if (!GetObjectVisibilityContainer().GetVisiblePlayersMap().empty())
+        return true;
+
+    // A trigger may act on players without being seen
+    if (IsTrigger())
+        return true;
+
+    return HasOwnUpdateReason();
+}
+
+bool Creature::HasOwnUpdateReason()
+{
+    if (WorldObject::IsUpdateNeeded())
+        return true;
+
+    if (IsInCombat())
         return true;
 
     if (ToTempSummon())

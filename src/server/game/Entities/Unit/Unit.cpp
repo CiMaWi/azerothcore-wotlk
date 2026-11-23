@@ -41,6 +41,7 @@
 #include "GameTime.h"
 #include "GridNotifiersImpl.h"
 #include "Group.h"
+#include "LightweightPerf.h"
 #include "Log.h"
 #include "MapMgr.h"
 #include "MoveSpline.h"
@@ -515,6 +516,7 @@ void Unit::Update(uint32 p_time)
     // Spells must be processed with event system BEFORE they go to _UpdateSpells.
     // Or else we may have some SPELL_STATE_FINISHED spells stalled in pointers, that is bad.
     WorldObject::Update(p_time);
+    LightweightPerf::UnitLap(LightweightPerf::PhaseEvents);
 
     if (!IsInWorld())
         return;
@@ -544,8 +546,10 @@ void Unit::Update(uint32 p_time)
                 m_delayed_unit_ai_notify_timer -= p_time;
         }
     }
+    LightweightPerf::UnitLap(LightweightPerf::PhaseNotify);
 
     _UpdateSpells( p_time );
+    LightweightPerf::UnitLap(LightweightPerf::PhaseSpells);
 
     // update combat timer only for players and pets (only pets with PetAI)
     if (IsInCombat() && (IsPlayer() || ((IsPet() || HasUnitTypeMask(UNIT_MASK_CONTROLLABLE_GUARDIAN)) && IsControlledByPlayer())))
@@ -638,9 +642,11 @@ void Unit::Update(uint32 p_time)
     ModifyAuraState(AURA_STATE_HEALTHLESS_20_PERCENT, IsAlive() ? HealthBelowPct(20) : false);
     ModifyAuraState(AURA_STATE_HEALTHLESS_35_PERCENT, IsAlive() ? HealthBelowPct(35) : false);
     ModifyAuraState(AURA_STATE_HEALTH_ABOVE_75_PERCENT, IsAlive() ? HealthAbovePct(75) : false);
+    LightweightPerf::UnitLap(LightweightPerf::PhaseCombat);
 
     UpdateSplineMovement(p_time);
     GetMotionMaster()->UpdateMotion(p_time);
+    LightweightPerf::UnitLap(LightweightPerf::PhaseMovement);
 
     InvalidateValuesUpdateCache();
 }

@@ -64,6 +64,8 @@ Interval interval;
 std::uint64_t since = 0;
 thread_local MapScope* activeMap = nullptr;
 thread_local WorldScope* activeWorld = nullptr;
+thread_local UnitScope* activeUnit = nullptr;
+thread_local VisibilityScope* activeVisibility = nullptr;
 thread_local std::uint64_t mapQueuedAt = 0;
 
 std::uint64_t Now()
@@ -155,6 +157,46 @@ constexpr char const* MapNames[] = {"sessions",
                                     "objects_gameobject_transport",
                                     "objects_gameobject_leaving",
                                     "objects_dynamicobject",
+                                    "unit_player_fight_events",
+                                    "unit_player_fight_notify",
+                                    "unit_player_fight_spells",
+                                    "unit_player_fight_combat",
+                                    "unit_player_fight_movement",
+                                    "unit_player_fight_ai",
+                                    "unit_player_fight_regen",
+                                    "unit_player_fight_hooks",
+                                    "unit_player_fight_rest",
+                                    "unit_player_idle_events",
+                                    "unit_player_idle_notify",
+                                    "unit_player_idle_spells",
+                                    "unit_player_idle_combat",
+                                    "unit_player_idle_movement",
+                                    "unit_player_idle_ai",
+                                    "unit_player_idle_regen",
+                                    "unit_player_idle_hooks",
+                                    "unit_player_idle_rest",
+                                    "unit_creature_fight_events",
+                                    "unit_creature_fight_notify",
+                                    "unit_creature_fight_spells",
+                                    "unit_creature_fight_combat",
+                                    "unit_creature_fight_movement",
+                                    "unit_creature_fight_ai",
+                                    "unit_creature_fight_regen",
+                                    "unit_creature_fight_hooks",
+                                    "unit_creature_fight_rest",
+                                    "unit_creature_idle_events",
+                                    "unit_creature_idle_notify",
+                                    "unit_creature_idle_spells",
+                                    "unit_creature_idle_combat",
+                                    "unit_creature_idle_movement",
+                                    "unit_creature_idle_ai",
+                                    "unit_creature_idle_regen",
+                                    "unit_creature_idle_hooks",
+                                    "unit_creature_idle_rest",
+                                    "visibility_player",
+                                    "visibility_creature",
+                                    "visibility_checked_player",
+                                    "visibility_checked_creature",
                                     "count_players",
                                     "count_player_updates",
                                     "count_cpu_valid",
@@ -288,12 +330,71 @@ void RecordObjectKinds(std::array<Row, ObjectKindCount> const& kinds)
     activeMap->Add(ObjectsSampled, total);
 }
 
-AiScope::AiScope() : _task(activeMap), _start(_task ? Now() : 0) {}
+void UnitLap(UnitPhase phase)
+{
+    if (activeUnit)
+        activeUnit->Lap(phase);
+}
+
+void UnitScope::Begin()
+{
+    if (!activeMap || activeUnit)
+        return;
+
+    _on = true;
+    _task = activeMap;
+    _last = Now();
+    activeUnit = this;
+}
+
+void UnitScope::Lap(UnitPhase phase)
+{
+    std::uint64_t const now = Now();
+    _ns[phase] += now - _last;
+    _last = now;
+}
+
+void UnitScope::End()
+{
+    Lap(PhaseRest);
+    std::size_t const first = UnitPhases + _group * UnitPhaseCount;
+    for (std::size_t i = 0; i < UnitPhaseCount; ++i)
+        _task->Add(first + i, _ns[i]);
+    activeUnit = nullptr;
+}
+
+void CountChecked(std::uint32_t objects)
+{
+    if (activeVisibility)
+        activeVisibility->Count(objects);
+}
+
+void VisibilityScope::Begin()
+{
+    if (!activeMap || activeVisibility)
+        return;
+
+    _on = true;
+    _task = activeMap;
+    _start = Now();
+    activeVisibility = this;
+}
+
+void VisibilityScope::End()
+{
+    _task->Add(_player ? VisibilityPlayer : VisibilityCreature, Now() - _start);
+    _task->Merge(_player ? VisibilityCheckedPlayer : VisibilityCheckedCreature, Row{_checked, 0, 0});
+    activeVisibility = nullptr;
+}
+
+// Bot AI runs inside a player's update, from a script hook: the hook time before it stays hooks, its own is ai
+AiScope::AiScope() : _task(activeMap), _start(_task ? Now() : 0) { UnitLap(PhaseHooks); }
 
 AiScope::~AiScope()
 {
     if (_task)
         _task->Add(Ai, Now() - _start);
+    UnitLap(PhaseAi);
 }
 
 void AiScope::MarkPregate()

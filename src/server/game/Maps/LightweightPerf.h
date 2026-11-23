@@ -73,6 +73,32 @@ enum ObjectKind : std::size_t
     ObjectKindCount
 };
 
+// Where a unit's update spends its time, in the order Unit::Update and its callers run it. A sample, taken with the
+// object kinds: a phase row counts the units and their time in that phase
+enum UnitPhase : std::size_t
+{
+    PhaseEvents,
+    PhaseNotify,
+    PhaseSpells,
+    PhaseCombat,
+    PhaseMovement,
+    PhaseAi,
+    PhaseRegen,
+    PhaseHooks,
+    PhaseRest,
+    UnitPhaseCount
+};
+
+// In combat or not, read before the update
+enum UnitGroup : std::size_t
+{
+    PlayerFight,
+    PlayerIdle,
+    CreatureFight,
+    CreatureIdle,
+    UnitGroupCount
+};
+
 enum MapRow : std::size_t
 {
     Task = MapSectionCount,
@@ -84,7 +110,14 @@ enum MapRow : std::size_t
     // counts those updates and their object time; the kind rows count the objects and their update time
     ObjectsSampled,
     ObjectKinds,
-    Players = ObjectKinds + ObjectKindCount,
+    // Per UnitGroup the UnitPhase rows, then the delayed relocations of the same pass: per mover type its time, and
+    // (calls only) the objects its notifiers visited
+    UnitPhases = ObjectKinds + ObjectKindCount,
+    VisibilityPlayer = UnitPhases + UnitGroupCount * UnitPhaseCount,
+    VisibilityCreature,
+    VisibilityCheckedPlayer,
+    VisibilityCheckedCreature,
+    Players,
     PlayerUpdates,
     CpuValid,
     CpuInvalid,
@@ -104,6 +137,10 @@ void RecordMapSections(std::uint64_t const* sections, std::uint32_t players, std
 bool MapTimed();
 // One sampled pass over a map's update list: per ObjectKind the objects and their update time (ns)
 void RecordObjectKinds(std::array<Row, ObjectKindCount> const& kinds);
+// Files the time since the previous lap of the current UnitScope under the phase; no scope: returns
+void UnitLap(UnitPhase phase);
+// Adds visited objects to the current VisibilityScope; none: returns
+void CountChecked(std::uint32_t objects);
 // World thread only: it reads the world update-time table, whose percentiles sort it without a lock.
 std::string Snapshot(bool reset, bool metricsEnabled);
 
@@ -127,6 +164,70 @@ private:
     std::uint64_t _start = 0;
     std::uint64_t _cpuStart = 0;
     std::array<Row, MapRowCount> _rows;
+};
+
+// One sampled unit update on a timed map task. Scopes do not nest: one made while another is current is off
+class UnitScope
+{
+public:
+    UnitScope(bool on, UnitGroup group) : _group(group)
+    {
+        if (on)
+            Begin();
+    }
+
+    ~UnitScope()
+    {
+        if (_on)
+            End();
+    }
+
+    UnitScope(UnitScope const&) = delete;
+    UnitScope& operator=(UnitScope const&) = delete;
+
+    void Lap(UnitPhase phase);
+
+private:
+    void Begin();
+    void End();
+
+    bool _on = false;
+    UnitGroup _group;
+    MapScope* _task = nullptr;
+    std::uint64_t _last = 0;
+    std::array<std::uint64_t, UnitPhaseCount> _ns{};
+};
+
+// One sampled delayed relocation: its time and the objects its notifiers visit, by mover type
+class VisibilityScope
+{
+public:
+    VisibilityScope(bool on, bool player) : _player(player)
+    {
+        if (on)
+            Begin();
+    }
+
+    ~VisibilityScope()
+    {
+        if (_on)
+            End();
+    }
+
+    VisibilityScope(VisibilityScope const&) = delete;
+    VisibilityScope& operator=(VisibilityScope const&) = delete;
+
+    void Count(std::uint32_t objects) { _checked += objects; }
+
+private:
+    void Begin();
+    void End();
+
+    bool _on = false;
+    bool _player;
+    MapScope* _task = nullptr;
+    std::uint64_t _start = 0;
+    std::uint64_t _checked = 0;
 };
 
 class AiScope

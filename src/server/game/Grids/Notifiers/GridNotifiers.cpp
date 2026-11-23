@@ -16,6 +16,7 @@
  */
 
 #include "GridNotifiers.h"
+#include "LightweightPerf.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
 #include "Transport.h"
@@ -162,9 +163,11 @@ void PlayerRelocationNotifier::Visit(PlayerMapType& m)
 
 void CreatureRelocationNotifier::Visit(PlayerMapType& m)
 {
+    uint32 visited = 0;
     for (PlayerMapType::iterator iter = m.begin(); iter != m.end(); ++iter)
     {
         Player* player = iter->GetSource();
+        ++visited;
 
         // NOTIFY_VISIBILITY_CHANGED does not guarantee that player will do it himself (because distance is also checked), but screw it, it's not that important
         if (!player->m_seer->isNeedNotify(NOTIFY_VISIBILITY_CHANGED))
@@ -174,6 +177,7 @@ void CreatureRelocationNotifier::Visit(PlayerMapType& m)
         if (!player->m_seer->isNeedNotify(NOTIFY_AI_RELOCATION) && !i_creature.IsMoveInLineOfSightStrictlyDisabled())
             CreatureUnitRelocationWorker(&i_creature, player);
     }
+    LightweightPerf::CountChecked(visited);
 }
 
 void AIRelocationNotifier::Visit(CreatureMapType& m)
