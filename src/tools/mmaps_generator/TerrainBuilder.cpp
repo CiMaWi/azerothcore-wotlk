@@ -939,13 +939,15 @@ namespace MMAP
             float p0[3], p1[3];
             uint32 mid, tx, ty;
             float size;
+            int dir = 1; // an optional 11th number: 1 both directions (the default), 0 one way from start to end
 
-            if (sscanf(line.c_str(),
-                       "%u %u,%u (%f %f %f) (%f %f %f) %f",
-                       &mid, &tx, &ty,
-                       &p0[0], &p0[1], &p0[2],
-                       &p1[0], &p1[1], &p1[2],
-                       &size) != 10)
+            int const read = sscanf(line.c_str(),
+                                    "%u %u,%u (%f %f %f) (%f %f %f) %f %d",
+                                    &mid, &tx, &ty,
+                                    &p0[0], &p0[1], &p0[2],
+                                    &p1[0], &p1[1], &p1[2],
+                                    &size, &dir);
+            if ((read != 10 && read != 11) || (dir != 0 && dir != 1))
             {
                 printf("Skipped off-mesh connection '%s': invalid format\n", line.c_str());
                 continue;
@@ -961,10 +963,13 @@ namespace MMAP
                 meshData.offMeshConnections.append(p1[2]);
                 meshData.offMeshConnections.append(p1[0]);
 
-                meshData.offMeshConnectionDirs.append(1);      // 1 - both direction, 0 - one sided
+                meshData.offMeshConnectionDirs.append(static_cast<unsigned char>(dir)); // 1 both directions, 0 one way
                 meshData.offMeshConnectionRads.append(size);   // agent radius equivalent
-                meshData.offMeshConnectionsAreas.append((unsigned char)0xFF);
-                meshData.offMeshConnectionsFlags.append((unsigned short)0xFF);
+                // A link is plain ground: the server copies a polygon's area into its flags, and the bots' query
+                // filter (PathGenerator::CreateFilter) excludes NAV_GROUND_STEEP, NAV_MAGMA and NAV_SLIME. The old
+                // 0xFF carried those bits, so no bot took a link; creatures and players include ground too.
+                meshData.offMeshConnectionsAreas.append(static_cast<unsigned char>(NAV_GROUND));
+                meshData.offMeshConnectionsFlags.append(static_cast<unsigned short>(NAV_GROUND));
             }
         }
     }

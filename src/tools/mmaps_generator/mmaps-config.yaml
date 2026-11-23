@@ -22,10 +22,23 @@ mmapsConfig:
   #   start      - World position where the connection begins.
   #   end        - World position where the connection ends.
   #   size       - Effective radius of the connection (agent clearance / usability width).
+  #   direction  - Optional: 1 both ways (the default), 0 one way, from start to end.
   offmeshConnections:
     # Make Blades Edge Arena Ropes wider
     - "562 31,20 (6234.474121 256.563721 11.063726) (6230.162598 251.681976 11.199670) 2.1"
     - "562 31,20 (6242.273926 266.697540 11.090456) (6246.688965 272.064819 11.235604) 2.1"
+
+  # Marked areas (world coordinates) act in every tile the area touches. Kinds:
+  #   walkable - the source triangles whose centroid lies inside are ground, also where walkableSlopeAngle drops
+  #              them or the steep rule (50 degrees) tags them, and the ledge filter keeps the spans inside: a ramp
+  #              up to about 76 degrees joins (63 degrees outside an area, at walkableClimb 4);
+  #   blocked  - no mesh in the cells whose centre and floor lie inside (liquid too);
+  #   plain    - ground instead of the steep tag in the cells inside; ground the slope rule dropped stays dropped.
+  # Where areas of one kind overlap, the later entry decides.
+  # Format (a box, or an outline of [x, y] corners with a z range):
+  #   markedAreas:
+  #     - { place: "name", map: 1, kind: walkable, box: { x: [x1, x2], y: [y1, y2], z: [z1, z2] } }
+  #     - { place: "name", map: 1, kind: blocked, outline: [[x, y], [x, y], [x, y]], z: [z1, z2] }
 
   meshSettings:
     # Here we have global config for recast navigation.

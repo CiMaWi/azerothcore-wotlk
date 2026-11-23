@@ -23,6 +23,8 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 #include <boost/program_options/options_description.hpp>
 #include "Define.h"
 #include "MapDefines.h"
@@ -80,6 +82,30 @@ namespace MMAP
         std::string DataDirPath() const { return _dataDir.string(); }
 
         std::vector<std::string> const& OffMeshConnections() const { return _offmeshConnections; }
+
+        // A marked area (mmapsConfig.markedAreas), in every tile the area touches (the tiles' border overlap keeps
+        // them consistent). Walkable acts on the source triangles whose centroid lies inside and in the ledge filter;
+        // blocked and plain on the cells of the compact heightfield whose centre and floor lie inside.
+        enum class MarkedAreaKind : uint8
+        {
+            Walkable, // ground, also where the slope rule drops the triangle, tags it steep or the ledge filter cuts it
+            Blocked,  // no mesh
+            Plain     // ground instead of the steep tag; ground the slope rule dropped stays dropped
+        };
+
+        struct MarkedArea
+        {
+            std::string place;
+            uint32 mapId = 0;
+            MarkedAreaKind kind = MarkedAreaKind::Walkable;
+            // world coordinates; with an outline, x and y are its bounds
+            float minX = 0.0f, maxX = 0.0f, minY = 0.0f, maxY = 0.0f, minZ = 0.0f, maxZ = 0.0f;
+            std::vector<std::pair<float, float>> outline; // world (x, y) corners; empty: the box alone
+
+            bool Contains(float x, float y, float z) const;
+        };
+
+        std::vector<MarkedArea> const& MarkedAreas() const { return _markedAreas; }
 
     private:
         explicit Config();
@@ -165,6 +191,7 @@ namespace MMAP
         std::filesystem::path _dataDir;
 
         std::vector<std::string> _offmeshConnections;
+        std::vector<MarkedArea> _markedAreas;
     };
 }
 
