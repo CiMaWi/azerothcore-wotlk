@@ -613,6 +613,42 @@ namespace MMAP
             for (int p : polysOf[m])
                 if (mesh.areas[p] != mesh.areas[polysOf[m][0]])
                     return -1;
+            // every polygon at m keeps its winding and gets no dent with m on k's place: a thin one would turn over
+            // or lose its area, a wide one get a corner that points inward
+            for (int p : polysOf[m])
+            {
+                unsigned short const* poly = &mesh.polys[p * nvp * 2];
+                int const n = polyVertCount(poly, nvp);
+                auto at = [&](int q, bool moved, int axis)
+                {
+                    unsigned short const v = poly[q % n];
+                    return (long long)mesh.verts[(moved && v == m ? k : v) * 3 + axis];
+                };
+                // twice the corner's turn at vertex q + 1, and their sum over the polygon's corners: twice its area
+                auto turn = [&](int q, bool moved)
+                {
+                    return (at(q + 1, moved, 0) - at(q, moved, 0)) * (at(q + 2, moved, 2) - at(q + 1, moved, 2)) -
+                           (at(q + 1, moved, 2) - at(q, moved, 2)) * (at(q + 2, moved, 0) - at(q + 1, moved, 0));
+                };
+                auto area2 = [&](bool moved)
+                {
+                    long long sum = 0;
+                    for (int q = 0; q < n; ++q)
+                        sum += at(q, moved, 0) * at(q + 1, moved, 2) - at(q + 1, moved, 0) * at(q, moved, 2);
+                    return sum;
+                };
+                long long const before = area2(false);
+                long long const after = area2(true);
+                if (!before || !after || (before > 0) != (after > 0))
+                    return -1;
+                for (int q = 0; q < n; ++q)
+                {
+                    long long const was = turn(q, false);
+                    long long const now = turn(q, true);
+                    if (now && (now > 0) != (before > 0) && (!was || (was > 0) == (before > 0)))
+                        return -1;
+                }
+            }
             bool toward = false;
             bool away = false;
             for (SeamEdge const& e : edges)
