@@ -20,6 +20,7 @@
 #include <DetourNavMesh.h>
 #include <DetourNavMeshBuilder.h>
 #include <DetourNavMeshQuery.h>
+#include <RecastAlloc.h>
 #include "IntermediateValues.h"
 #include "MapDefines.h"
 #include "MapTree.h"
@@ -30,9 +31,12 @@
 #include "VMapDefinitions.h"
 #include "VMapMgr2.h"
 #include "WorldModel.h"
+#include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <fstream>
+#include <map>
 #include <unordered_map>
 
 namespace MMAP
@@ -186,6 +190,15 @@ namespace MMAP
         }
     }
 
+    // What joinSubTileSeams changed on a tile (counts of the final build pass)
+    struct SeamStats
+    {
+        int snapped = 0;  // border vertices moved onto the other side's vertex (within one cell)
+        int inserted = 0; // vertices of the other side inserted into an edge (T-junctions)
+        int split = 0;    // polygons split into convex pieces because the insertions took them over nvp vertices
+        int open = 0;     // overlapping edge pairs across a line still unlinked after the pass
+    };
+
     // The floor the generator's own steps cut from a tile, in cells of its own area (the border cells excluded,
     // summed over the sub-tiles of the first build pass): written beside the tile as counts only, the tile's bytes
     // do not depend on them. Ledge, low ceiling and the low-obstacle gain count solid spans; radius (the erosion by
@@ -199,6 +212,7 @@ namespace MMAP
         long long compact = 0;     // walkable spans of the compact heightfield (solid and liquid)
         long long radius = 0;      // rcErodeWalkableArea
         long long smallRegion = 0; // rcBuildRegions: walkable spans left without a region
+        SeamStats seams;
     };
 
     // <tile file>.cuts.json beside the tile; a tile without the file was built before the counts existed
@@ -215,10 +229,690 @@ namespace MMAP
         fprintf(file,
                 "{\"map\":%u,\"tileX\":%u,\"tileY\":%u,\"cellSize\":%.6f,\"cells\":{\"raster\":%lld,"
                 "\"lowObstacle\":%lld,\"ledge\":%lld,\"lowCeiling\":%lld,\"compact\":%lld,\"radius\":%lld,"
-                "\"smallRegion\":%lld}}\n",
+                "\"smallRegion\":%lld},\"seams\":{\"snapped\":%d,\"inserted\":%d,\"split\":%d,\"open\":%d}}\n",
                 mapID, tileX, tileY, cellSize, cuts.raster, cuts.lowObstacle, cuts.ledge, cuts.lowCeiling, cuts.compact,
-                cuts.radius, cuts.smallRegion);
+                cuts.radius, cuts.smallRegion, cuts.seams.snapped, cuts.seams.inserted, cuts.seams.split,
+                cuts.seams.open);
         fclose(file);
+    }
+
+    // ---- Sub-tile seams (pathing PA43) ----
+    // A map tile is built in sub-tiles of tileSize cells and merged by rcMergePolyMeshes, which links two polygons
+    // only where they share both vertices of an edge. Each sub-tile places its own vertices on the line it shares with
+    // the next, so floor that crosses the line is often cut there: a corner one cell off the other side's, or one long
+    // edge facing several shorter ones (a T-junction). joinSubTileSeams, after the merge: (1) moves a border vertex
+    // onto the other side's within one cell, only where no polygon's edge on the line gets shorter (no floor lost; the
+    // floor gained is a sliver of at most one cell beside the other side's floor); (2) inserts the other side's
+    // vertices into the edges they lie on (no floor changes), splitting a polygon over nvp vertices into convex pieces
+    // whose detail triangles are the polygon's clipped to the piece; (3) rebuilds the adjacency as rcMergePolyMeshes
+    // does. A vertex on the tile's border or on two lines is never moved; a tile without an edge to join is untouched.
+    struct SeamEdge
+    {
+        int poly;
+        int edge;
+        int axis; // 0 or 2: the coordinate that is constant along the line
+        int line; // that coordinate, in cells of the merged mesh
+        int side; // -1 or 1: the side of the line the polygon lies on
+        unsigned short v0;
+        unsigned short v1;
+    };
+
+    static int polyVertCount(unsigned short const* poly, int nvp)
+    {
+        int n = 0;
+        while (n < nvp && poly[n] != RC_MESH_NULL_IDX)
+            ++n;
+        return n;
+    }
+
+    static bool isPortalEdge(unsigned short neighbour)
+    {
+        return neighbour != RC_MESH_NULL_IDX && (neighbour & 0x8000);
+    }
+
+    // rcMergePolyMeshes' buildMeshAdjacency (Eric Lengyel's edge matching), the portal flags of the tile's border kept
+    static void rebuildAdjacency(rcPolyMesh& mesh)
+    {
+        struct Edge
+        {
+            unsigned short vert[2];
+            int poly[2];
+            int polyEdge[2];
+        };
+        int const nvp = mesh.nvp;
+        std::vector<int> firstEdge(mesh.nverts, -1);
+        std::vector<int> nextEdge;
+        std::vector<Edge> edges;
+        for (int i = 0; i < mesh.npolys; ++i)
+        {
+            unsigned short* poly = &mesh.polys[i * nvp * 2];
+            int const n = polyVertCount(poly, nvp);
+            for (int j = 0; j < n; ++j)
+            {
+                if (!isPortalEdge(poly[nvp + j]))
+                    poly[nvp + j] = RC_MESH_NULL_IDX;
+                unsigned short const v0 = poly[j];
+                unsigned short const v1 = poly[(j + 1) % n];
+                if (v0 < v1)
+                {
+                    edges.push_back({ { v0, v1 }, { i, i }, { j, 0 } });
+                    nextEdge.push_back(firstEdge[v0]);
+                    firstEdge[v0] = int(edges.size()) - 1;
+                }
+            }
+        }
+        for (int i = 0; i < mesh.npolys; ++i)
+        {
+            unsigned short const* poly = &mesh.polys[i * nvp * 2];
+            int const n = polyVertCount(poly, nvp);
+            for (int j = 0; j < n; ++j)
+            {
+                unsigned short const v0 = poly[j];
+                unsigned short const v1 = poly[(j + 1) % n];
+                if (v0 <= v1)
+                    continue;
+                for (int e = firstEdge[v1]; e != -1; e = nextEdge[e])
+                {
+                    if (edges[e].vert[1] == v0 && edges[e].poly[0] == edges[e].poly[1])
+                    {
+                        edges[e].poly[1] = i;
+                        edges[e].polyEdge[1] = j;
+                        break;
+                    }
+                }
+            }
+        }
+        for (Edge const& e : edges)
+        {
+            if (e.poly[0] == e.poly[1])
+                continue;
+            mesh.polys[e.poly[0] * nvp * 2 + nvp + e.polyEdge[0]] = (unsigned short)e.poly[1];
+            mesh.polys[e.poly[1] * nvp * 2 + nvp + e.polyEdge[1]] = (unsigned short)e.poly[0];
+        }
+    }
+
+    // the open edges lying on a line (both vertices on it), sorted by line
+    static std::vector<SeamEdge> seamEdges(rcPolyMesh const& mesh, std::vector<int> const* lines)
+    {
+        std::vector<SeamEdge> out;
+        int const nvp = mesh.nvp;
+        for (int i = 0; i < mesh.npolys; ++i)
+        {
+            unsigned short const* poly = &mesh.polys[i * nvp * 2];
+            int const n = polyVertCount(poly, nvp);
+            for (int j = 0; j < n; ++j)
+            {
+                if (poly[nvp + j] != RC_MESH_NULL_IDX)
+                    continue;
+                unsigned short const v0 = poly[j];
+                unsigned short const v1 = poly[(j + 1) % n];
+                for (int axis = 0; axis <= 2; axis += 2)
+                {
+                    int const c = mesh.verts[v0 * 3 + axis];
+                    std::vector<int> const& onAxis = lines[axis / 2];
+                    if (mesh.verts[v1 * 3 + axis] != c || mesh.verts[v0 * 3 + 2 - axis] == mesh.verts[v1 * 3 + 2 - axis]
+                        || !std::binary_search(onAxis.begin(), onAxis.end(), c))
+                        continue;
+                    long long sum = 0;
+                    for (int k = 0; k < n; ++k)
+                        sum += mesh.verts[poly[k] * 3 + axis];
+                    long long const offset = sum - (long long)c * n;
+                    if (offset)
+                        out.push_back({ i, j, axis, c, offset < 0 ? -1 : 1, v0, v1 });
+                }
+            }
+        }
+        std::stable_sort(out.begin(), out.end(), [](SeamEdge const& a, SeamEdge const& b)
+                         { return a.axis != b.axis ? a.axis < b.axis : a.line < b.line; });
+        return out;
+    }
+
+    static int alongLine(rcPolyMesh const& mesh, SeamEdge const& e, unsigned short v)
+    {
+        return mesh.verts[v * 3 + 2 - e.axis];
+    }
+
+    // the edge's height (cells) where it passes position t along its line
+    static float seamEdgeHeight(rcPolyMesh const& mesh, SeamEdge const& e, int t)
+    {
+        int const t0 = alongLine(mesh, e, e.v0);
+        int const t1 = alongLine(mesh, e, e.v1);
+        float const y0 = mesh.verts[e.v0 * 3 + 1];
+        float const y1 = mesh.verts[e.v1 * 3 + 1];
+        return y0 + (y1 - y0) * float(t - t0) / float(t1 - t0);
+    }
+
+    // two open edges from the two sides of one line that overlap along it, heights within the climb at both ends
+    static bool seamPair(rcPolyMesh const& mesh, SeamEdge const& a, SeamEdge const& b, int climb)
+    {
+        if (a.axis != b.axis || a.line != b.line || a.side == b.side)
+            return false;
+        int const lo = std::max(std::min(alongLine(mesh, a, a.v0), alongLine(mesh, a, a.v1)),
+                                std::min(alongLine(mesh, b, b.v0), alongLine(mesh, b, b.v1)));
+        int const hi = std::min(std::max(alongLine(mesh, a, a.v0), alongLine(mesh, a, a.v1)),
+                                std::max(alongLine(mesh, b, b.v0), alongLine(mesh, b, b.v1)));
+        if (lo >= hi)
+            return false;
+        return std::fabs(seamEdgeHeight(mesh, a, lo) - seamEdgeHeight(mesh, b, lo)) <= climb &&
+               std::fabs(seamEdgeHeight(mesh, a, hi) - seamEdgeHeight(mesh, b, hi)) <= climb;
+    }
+
+    // every pair of the edges (index pairs, the first from side -1); edges are sorted by line
+    static std::vector<std::pair<int, int>> seamPairs(rcPolyMesh const& mesh, std::vector<SeamEdge> const& edges,
+                                                      int climb)
+    {
+        std::vector<std::pair<int, int>> pairs;
+        for (size_t begin = 0, end = 0; begin < edges.size(); begin = end)
+        {
+            while (end < edges.size() && edges[end].axis == edges[begin].axis && edges[end].line == edges[begin].line)
+                ++end;
+            for (size_t i = begin; i < end; ++i)
+                for (size_t j = begin; j < end; ++j)
+                    if (edges[i].side < 0 && seamPair(mesh, edges[i], edges[j], climb))
+                        pairs.emplace_back(int(i), int(j));
+        }
+        return pairs;
+    }
+
+    // the detail triangles of a polygon (world positions) clipped to a convex piece of it (world x, z), as a detail
+    // mesh of the piece: its hull vertices first, then the clipped vertices; every triangle uses the clipped ones
+    static void clipDetailToPiece(std::vector<std::array<float, 3>> const& srcTris,
+                                  std::vector<std::array<float, 3>> const& hull, std::vector<float>& verts,
+                                  std::vector<unsigned char>& tris)
+    {
+        int const nh = int(hull.size());
+        double area = 0;
+        for (int i = 0; i < nh; ++i)
+            area += double(hull[i][0]) * hull[(i + 1) % nh][2] - double(hull[(i + 1) % nh][0]) * hull[i][2];
+        double const orient = area < 0 ? -1.0 : 1.0;
+        std::map<std::array<float, 3>, int> index;
+        std::vector<std::array<float, 3>> extra;
+        std::vector<std::array<int, 3>> outTris;
+        auto vertexOf = [&](std::array<float, 3> const& p)
+        {
+            auto it = index.find(p);
+            if (it != index.end())
+                return it->second;
+            extra.push_back(p);
+            return index[p] = nh + int(extra.size()) - 1;
+        };
+        for (size_t t = 0; t + 2 < srcTris.size(); t += 3)
+        {
+            std::vector<std::array<float, 3>> poly(srcTris.begin() + t, srcTris.begin() + t + 3);
+            for (int i = 0; i < nh && poly.size() >= 3; ++i)
+            {
+                std::array<float, 3> const& a = hull[i];
+                std::array<float, 3> const& b = hull[(i + 1) % nh];
+                double const len = std::hypot(double(b[0]) - a[0], double(b[2]) - a[2]);
+                if (len <= 0)
+                    continue;
+                auto dist = [&](std::array<float, 3> const& q)
+                {
+                    return orient * ((double(b[0]) - a[0]) * (double(q[2]) - a[2]) -
+                                     (double(b[2]) - a[2]) * (double(q[0]) - a[0])) / len;
+                };
+                std::vector<std::array<float, 3>> out;
+                for (size_t k = 0; k < poly.size(); ++k)
+                {
+                    std::array<float, 3> const& s = poly[k];
+                    std::array<float, 3> const& e = poly[(k + 1) % poly.size()];
+                    double const ds = dist(s);
+                    double const de = dist(e);
+                    if ((ds >= -1e-6) != (de >= -1e-6))
+                    {
+                        // the crossing from the lower endpoint, so both triangles of an edge get the same vertex
+                        bool const swap = e < s;
+                        std::array<float, 3> const& p = swap ? e : s;
+                        std::array<float, 3> const& q = swap ? s : e;
+                        double const dp = swap ? de : ds;
+                        double const dq = swap ? ds : de;
+                        double const f = dp / (dp - dq);
+                        out.push_back({ float(p[0] + (double(q[0]) - p[0]) * f),
+                                        float(p[1] + (double(q[1]) - p[1]) * f),
+                                        float(p[2] + (double(q[2]) - p[2]) * f) });
+                    }
+                    if (de >= -1e-6)
+                        out.push_back(e);
+                }
+                poly.swap(out);
+            }
+            for (size_t k = 1; k + 1 < poly.size(); ++k)
+            {
+                double const a2 = (double(poly[k][0]) - poly[0][0]) * (double(poly[k + 1][2]) - poly[0][2]) -
+                                  (double(poly[k + 1][0]) - poly[0][0]) * (double(poly[k][2]) - poly[0][2]);
+                if (std::fabs(a2) > 1e-6)
+                    outTris.push_back({ vertexOf(poly[0]), vertexOf(poly[k]), vertexOf(poly[k + 1]) });
+            }
+        }
+        // Detour stores a detail mesh's own vertex and triangle counts in a byte: a piece over that keeps a fan of
+        // its hull (heights of the polygon's vertices)
+        if (outTris.empty() || extra.size() + nh > 255 || outTris.size() > 255)
+        {
+            extra.clear();
+            outTris.clear();
+            for (int k = 1; k + 1 < nh; ++k)
+                outTris.push_back({ 0, k, k + 1 });
+        }
+        for (std::array<float, 3> const& p : hull)
+            verts.insert(verts.end(), p.begin(), p.end());
+        for (std::array<float, 3> const& p : extra)
+            verts.insert(verts.end(), p.begin(), p.end());
+        auto at = [&](int i) -> std::array<float, 3> const& { return i < nh ? hull[i] : extra[i - nh]; };
+        // Recast's getEdgeFlags: an edge on the piece's hull (both ends within 1 cm of one hull edge) is a boundary
+        auto onHull = [&](std::array<float, 3> const& p, std::array<float, 3> const& q)
+        {
+            using Point = std::array<float, 3>;
+            auto nearSegment = [](Point const& v, Point const& a, Point const& b)
+            {
+                double const dx = double(b[0]) - a[0];
+                double const dz = double(b[2]) - a[2];
+                double const l2 = dx * dx + dz * dz;
+                double t = l2 > 0 ? ((double(v[0]) - a[0]) * dx + (double(v[2]) - a[2]) * dz) / l2 : 0;
+                t = std::clamp(t, 0.0, 1.0);
+                double const ex = a[0] + t * dx - v[0];
+                double const ez = a[2] + t * dz - v[2];
+                return ex * ex + ez * ez < 1e-4;
+            };
+            for (int i = 0; i < nh; ++i)
+                if (nearSegment(p, hull[i], hull[(i + 1) % nh]) && nearSegment(q, hull[i], hull[(i + 1) % nh]))
+                    return 1;
+            return 0;
+        };
+        for (std::array<int, 3> const& t : outTris)
+        {
+            unsigned char const flags = (unsigned char)(onHull(at(t[0]), at(t[1])) | onHull(at(t[1]), at(t[2])) << 2 |
+                                                        onHull(at(t[2]), at(t[0])) << 4);
+            tris.insert(tris.end(), { (unsigned char)t[0], (unsigned char)t[1], (unsigned char)t[2], flags });
+        }
+    }
+
+    static SeamStats joinSubTileSeams(rcPolyMesh& mesh, rcPolyMeshDetail& dmesh, std::vector<int> const* lines,
+                                      int const (*border)[2], int climb)
+    {
+        SeamStats stats;
+        int const nvp = mesh.nvp;
+        std::vector<SeamEdge> edges = seamEdges(mesh, lines);
+        if (edges.empty())
+            return stats;
+        std::vector<std::pair<int, int>> pairs = seamPairs(mesh, edges, climb);
+        if (pairs.empty())
+            return stats;
+        auto vy = [&](unsigned short v) { return int(mesh.verts[v * 3 + 1]); };
+        auto polyHas = [&](int p, unsigned short v)
+        {
+            unsigned short const* poly = &mesh.polys[p * nvp * 2];
+            return std::find(poly, poly + polyVertCount(poly, nvp), v) != poly + polyVertCount(poly, nvp);
+        };
+
+        // (1) snap: a vertex on the border or on lines of both axes stays
+        std::vector<char> fixed(mesh.nverts, 0);
+        for (int v = 0; v < mesh.nverts; ++v)
+        {
+            int onLines = 0;
+            for (int a = 0; a < 2; ++a)
+            {
+                int const c = mesh.verts[v * 3 + a * 2];
+                onLines += std::binary_search(lines[a].begin(), lines[a].end(), c) ? 1 : 0;
+                if (c <= border[a][0] || c >= border[a][1])
+                    fixed[v] = 1;
+            }
+            if (onLines > 1)
+                fixed[v] = 1;
+        }
+        std::vector<std::vector<int>> polysOf(mesh.nverts);
+        for (int i = 0; i < mesh.npolys; ++i)
+        {
+            unsigned short const* poly = &mesh.polys[i * nvp * 2];
+            for (int k = 0, n = polyVertCount(poly, nvp); k < n; ++k)
+                polysOf[poly[k]].push_back(i);
+        }
+        struct Snap
+        {
+            int dist;
+            int e; // the side -1 edge
+            unsigned short a;
+            unsigned short b;
+            bool operator<(Snap const& o) const
+            {
+                return dist != o.dist ? dist < o.dist : (a != o.a ? a < o.a : b < o.b);
+            }
+        };
+        std::vector<Snap> snaps;
+        for (auto const& [i, j] : pairs)
+            for (unsigned short a : { edges[i].v0, edges[i].v1 })
+                for (unsigned short b : { edges[j].v0, edges[j].v1 })
+                {
+                    int const d = std::abs(alongLine(mesh, edges[i], a) - alongLine(mesh, edges[i], b));
+                    if (a != b && d <= 1 && std::abs(vy(a) - vy(b)) <= climb)
+                        snaps.push_back({ d, i, a, b });
+                }
+        std::sort(snaps.begin(), snaps.end());
+        std::vector<char> touched(mesh.nverts, 0);
+        // moving m (on side `side`) onto k: -1 not allowed (floor lost, a pinch or a fixed vertex), 0 floor kept,
+        // 1 a sliver gained
+        auto moveCost = [&](SeamEdge const& line, unsigned short m, unsigned short k, int side)
+        {
+            if (fixed[m])
+                return -1;
+            for (int p : polysOf[m])
+            {
+                if (polyHas(p, k))
+                    return -1;
+                unsigned short const* poly = &mesh.polys[p * nvp * 2];
+                int const n = polyVertCount(poly, nvp);
+                long long sum = 0;
+                for (int q = 0; q < n; ++q)
+                    sum += mesh.verts[poly[q] * 3 + line.axis];
+                if ((sum - (long long)line.line * n) * side < 0)
+                    return -1; // m is shared with the other side
+            }
+            int const dir = alongLine(mesh, line, k) - alongLine(mesh, line, m);
+            if (!dir)
+                return 0;
+            // the move turns the edges from m into its polygons: floor passes between them, so they must be one kind
+            for (int p : polysOf[m])
+                if (mesh.areas[p] != mesh.areas[polysOf[m][0]])
+                    return -1;
+            bool toward = false;
+            bool away = false;
+            for (SeamEdge const& e : edges)
+            {
+                if (e.axis != line.axis || e.line != line.line || e.side != side || (e.v0 != m && e.v1 != m))
+                    continue;
+                int const other = alongLine(mesh, e, e.v0 == m ? e.v1 : e.v0) - alongLine(mesh, e, m);
+                (other * dir > 0 ? toward : away) = true;
+            }
+            if (toward && !away)
+                return -1;
+            return away && !toward ? 1 : 0;
+        };
+        for (Snap const& s : snaps)
+        {
+            if (touched[s.a] || touched[s.b])
+                continue;
+            SeamEdge const& line = edges[s.e];
+            int const costA = moveCost(line, s.a, s.b, -1);
+            int const costB = moveCost(line, s.b, s.a, 1);
+            if (costA < 0 && costB < 0)
+                continue;
+            bool const moveA = costA >= 0 && (costB < 0 || costA <= costB);
+            unsigned short const m = moveA ? s.a : s.b;
+            unsigned short const k = moveA ? s.b : s.a;
+            for (int p : polysOf[m])
+            {
+                unsigned short* poly = &mesh.polys[p * nvp * 2];
+                std::replace(poly, poly + polyVertCount(poly, nvp), m, k);
+                polysOf[k].push_back(p);
+            }
+            polysOf[m].clear();
+            touched[s.a] = touched[s.b] = 1;
+            ++stats.snapped;
+        }
+        if (stats.snapped)
+        {
+            rebuildAdjacency(mesh);
+            edges = seamEdges(mesh, lines);
+            pairs = seamPairs(mesh, edges, climb);
+        }
+
+        // (2) T-junctions: the other side's vertices strictly inside an edge, at its height within the climb
+        std::map<std::pair<int, int>, std::vector<unsigned short>> inserts;
+        for (auto const& [i, j] : pairs)
+        {
+            for (int pass = 0; pass < 2; ++pass)
+            {
+                SeamEdge const& e = edges[pass ? j : i];
+                SeamEdge const& f = edges[pass ? i : j];
+                int const lo = std::min(alongLine(mesh, e, e.v0), alongLine(mesh, e, e.v1));
+                int const hi = std::max(alongLine(mesh, e, e.v0), alongLine(mesh, e, e.v1));
+                for (unsigned short w : { f.v0, f.v1 })
+                {
+                    int const t = alongLine(mesh, e, w);
+                    if (t > lo && t < hi && std::fabs(vy(w) - seamEdgeHeight(mesh, e, t)) <= climb &&
+                        !polyHas(e.poly, w))
+                        inserts[{ e.poly, e.edge }].push_back(w);
+                }
+            }
+        }
+
+        // the new vertex lists; a polygon over nvp vertices becomes a fan of convex pieces from one of its vertices
+        struct Origin
+        {
+            int src;
+            int kind; // 0 unchanged, 1 vertices inserted (hullMap: old vertex -> new), 2 a piece (detail clipped)
+            std::vector<int> hullMap;
+        };
+        std::vector<Origin> origin(mesh.npolys);
+        std::vector<std::vector<unsigned short>> newPolys(mesh.npolys);
+        std::vector<int> changed;
+        for (int i = 0; i < mesh.npolys; ++i)
+            origin[i] = { i, 0, {} };
+        std::vector<char> done(mesh.npolys, 0);
+        for (auto const& [key, list] : inserts)
+        {
+            if (done[key.first])
+                continue;
+            int const p = key.first;
+            done[p] = 1;
+            unsigned short const* poly = &mesh.polys[p * nvp * 2];
+            int const n = polyVertCount(poly, nvp);
+            std::vector<unsigned short> verts;
+            std::vector<int> hullMap;
+            std::vector<char> original;
+            for (int k = 0; k < n; ++k)
+            {
+                hullMap.push_back(int(verts.size()));
+                verts.push_back(poly[k]);
+                original.push_back(1);
+                auto it = inserts.find({ p, k });
+                if (it == inserts.end())
+                    continue;
+                std::vector<unsigned short> add = it->second;
+                std::sort(add.begin(), add.end());
+                add.erase(std::unique(add.begin(), add.end()), add.end());
+                int const axis = 2 - (mesh.verts[poly[k] * 3] == mesh.verts[poly[(k + 1) % n] * 3] ? 0 : 2);
+                std::sort(add.begin(), add.end(), [&](unsigned short a, unsigned short b)
+                          { return std::abs(mesh.verts[a * 3 + axis] - mesh.verts[poly[k] * 3 + axis]) <
+                                   std::abs(mesh.verts[b * 3 + axis] - mesh.verts[poly[k] * 3 + axis]); });
+                for (unsigned short w : add)
+                {
+                    verts.push_back(w);
+                    original.push_back(0);
+                    ++stats.inserted;
+                }
+            }
+            changed.push_back(p);
+            int const total = int(verts.size());
+            if (total <= nvp)
+            {
+                // detail triangles index their vertices in a byte: where the shifted indices would not fit, clip
+                bool const fits = int(dmesh.meshes[p * 4 + 1]) - n + total <= 256;
+                origin[p] = { p, fits ? 1 : 2, fits ? hullMap : std::vector<int>() };
+                newPolys[p] = verts;
+                continue;
+            }
+            // the fan from the first original vertex whose pieces all have area (cells^2)
+            for (int anchor = 0; anchor < total; ++anchor)
+            {
+                if (!original[anchor])
+                    continue;
+                std::vector<std::vector<unsigned short>> pieces;
+                bool ok = true;
+                for (int start = 1; start < total - 1 && ok;)
+                {
+                    int const end = std::min(start + nvp - 2, total - 1);
+                    std::vector<unsigned short> piece{ verts[anchor] };
+                    for (int k = start; k <= end; ++k)
+                        piece.push_back(verts[(anchor + k) % total]);
+                    long long area2 = 0;
+                    for (size_t k = 0; k < piece.size(); ++k)
+                    {
+                        unsigned short const* a = &mesh.verts[piece[k] * 3];
+                        unsigned short const* b = &mesh.verts[piece[(k + 1) % piece.size()] * 3];
+                        area2 += (long long)a[0] * b[2] - (long long)b[0] * a[2];
+                    }
+                    ok = area2 != 0;
+                    pieces.push_back(piece);
+                    start = end;
+                }
+                if (!ok)
+                    continue;
+                newPolys[p] = pieces[0];
+                origin[p] = { p, 2, {} };
+                for (size_t k = 1; k < pieces.size(); ++k)
+                {
+                    newPolys.push_back(pieces[k]);
+                    origin.push_back({ p, 2, {} });
+                }
+                ++stats.split;
+                break;
+            }
+            if (origin[p].kind == 0)
+            {
+                stats.inserted -= total - n; // no fan without a degenerate piece: the polygon stays as it was
+                changed.pop_back();
+            }
+        }
+        if (changed.empty())
+        {
+            stats.open = int(pairs.size());
+            return stats;
+        }
+
+        // the polygon arrays, the changed polygons' border portals kept by their vertex pair
+        std::map<std::pair<unsigned short, unsigned short>, unsigned short> portals;
+        for (int p : changed)
+        {
+            unsigned short const* poly = &mesh.polys[p * nvp * 2];
+            for (int k = 0, n = polyVertCount(poly, nvp); k < n; ++k)
+                if (isPortalEdge(poly[nvp + k]))
+                    portals[{ poly[k], poly[(k + 1) % n] }] = poly[nvp + k];
+        }
+        int const npolys = int(origin.size());
+        unsigned short* polys = (unsigned short*)rcAlloc(sizeof(unsigned short) * npolys * 2 * nvp, RC_ALLOC_PERM);
+        unsigned short* regs = (unsigned short*)rcAlloc(sizeof(unsigned short) * npolys, RC_ALLOC_PERM);
+        unsigned char* areas = (unsigned char*)rcAlloc(sizeof(unsigned char) * npolys, RC_ALLOC_PERM);
+        unsigned short* flags = (unsigned short*)rcAlloc(sizeof(unsigned short) * npolys, RC_ALLOC_PERM);
+        memset(polys, 0xff, sizeof(unsigned short) * npolys * 2 * nvp);
+        for (int i = 0; i < npolys; ++i)
+        {
+            int const src = origin[i].src;
+            regs[i] = mesh.regs[src];
+            areas[i] = mesh.areas[src];
+            flags[i] = mesh.flags[src];
+            unsigned short* poly = &polys[i * nvp * 2];
+            if (!origin[i].kind)
+            {
+                memcpy(poly, &mesh.polys[src * nvp * 2], sizeof(unsigned short) * nvp * 2);
+                continue;
+            }
+            std::vector<unsigned short> const& verts = newPolys[i];
+            for (size_t k = 0; k < verts.size(); ++k)
+            {
+                poly[k] = verts[k];
+                auto it = portals.find({ verts[k], verts[(k + 1) % verts.size()] });
+                if (it != portals.end())
+                    poly[nvp + k] = it->second;
+            }
+        }
+
+        // the detail meshes: unchanged polygons copied, inserted vertices added to the hull, pieces clipped
+        float const* orig = mesh.bmin;
+        auto world = [&](unsigned short v) -> std::array<float, 3>
+        {
+            return { orig[0] + mesh.verts[v * 3] * mesh.cs, orig[1] + mesh.verts[v * 3 + 1] * mesh.ch,
+                     orig[2] + mesh.verts[v * 3 + 2] * mesh.cs };
+        };
+        std::vector<unsigned int> meshes(npolys * 4);
+        std::vector<float> dverts;
+        std::vector<unsigned char> dtris;
+        for (int i = 0; i < npolys; ++i)
+        {
+            int const src = origin[i].src;
+            unsigned int const vb = dmesh.meshes[src * 4];
+            unsigned int const nd = dmesh.meshes[src * 4 + 1];
+            unsigned int const tb = dmesh.meshes[src * 4 + 2];
+            unsigned int const nt = dmesh.meshes[src * 4 + 3];
+            int const nvOld = polyVertCount(&mesh.polys[src * nvp * 2], nvp);
+            unsigned int const vbase = (unsigned int)(dverts.size() / 3);
+            unsigned int const tbase = (unsigned int)(dtris.size() / 4);
+            if (origin[i].kind == 0)
+            {
+                dverts.insert(dverts.end(), dmesh.verts + vb * 3, dmesh.verts + (vb + nd) * 3);
+                dtris.insert(dtris.end(), dmesh.tris + tb * 4, dmesh.tris + (tb + nt) * 4);
+            }
+            else if (origin[i].kind == 1)
+            {
+                std::vector<unsigned short> const& verts = newPolys[i];
+                int const nvNew = int(verts.size());
+                for (unsigned short v : verts)
+                {
+                    std::array<float, 3> const p = world(v);
+                    dverts.insert(dverts.end(), p.begin(), p.end());
+                }
+                dverts.insert(dverts.end(), dmesh.verts + (vb + nvOld) * 3, dmesh.verts + (vb + nd) * 3);
+                for (unsigned int t = tb; t < tb + nt; ++t)
+                {
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        int const v = dmesh.tris[t * 4 + k];
+                        dtris.push_back((unsigned char)(v < nvOld ? origin[i].hullMap[v] : v - nvOld + nvNew));
+                    }
+                    dtris.push_back(dmesh.tris[t * 4 + 3]);
+                }
+            }
+            else
+            {
+                std::vector<std::array<float, 3>> srcTris;
+                unsigned short const* srcPoly = &mesh.polys[src * nvp * 2];
+                for (unsigned int t = tb; t < tb + nt; ++t)
+                {
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        int const v = dmesh.tris[t * 4 + k];
+                        srcTris.push_back(v < nvOld ? world(srcPoly[v])
+                                                    : std::array<float, 3>{ dmesh.verts[(vb + v) * 3],
+                                                                            dmesh.verts[(vb + v) * 3 + 1],
+                                                                            dmesh.verts[(vb + v) * 3 + 2] });
+                    }
+                }
+                std::vector<std::array<float, 3>> hull;
+                for (unsigned short v : newPolys[i])
+                    hull.push_back(world(v));
+                clipDetailToPiece(srcTris, hull, dverts, dtris);
+            }
+            meshes[i * 4] = vbase;
+            meshes[i * 4 + 1] = (unsigned int)(dverts.size() / 3) - vbase;
+            meshes[i * 4 + 2] = tbase;
+            meshes[i * 4 + 3] = (unsigned int)(dtris.size() / 4) - tbase;
+        }
+
+        rcFree(mesh.polys);
+        rcFree(mesh.regs);
+        rcFree(mesh.areas);
+        rcFree(mesh.flags);
+        mesh.polys = polys;
+        mesh.regs = regs;
+        mesh.areas = areas;
+        mesh.flags = flags;
+        mesh.npolys = npolys;
+        mesh.maxpolys = npolys;
+        rcFree(dmesh.meshes);
+        rcFree(dmesh.verts);
+        rcFree(dmesh.tris);
+        dmesh.meshes = (unsigned int*)rcAlloc(sizeof(unsigned int) * meshes.size(), RC_ALLOC_PERM);
+        dmesh.verts = (float*)rcAlloc(sizeof(float) * dverts.size(), RC_ALLOC_PERM);
+        dmesh.tris = (unsigned char*)rcAlloc(sizeof(unsigned char) * dtris.size(), RC_ALLOC_PERM);
+        memcpy(dmesh.meshes, meshes.data(), sizeof(unsigned int) * meshes.size());
+        memcpy(dmesh.verts, dverts.data(), sizeof(float) * dverts.size());
+        memcpy(dmesh.tris, dtris.data(), sizeof(unsigned char) * dtris.size());
+        dmesh.nmeshes = npolys;
+        dmesh.nverts = int(dverts.size() / 3);
+        dmesh.ntris = int(dtris.size() / 4);
+
+        rebuildAdjacency(mesh);
+        stats.open = int(seamPairs(mesh, seamEdges(mesh, lines), climb).size());
+        return stats;
     }
 
     static long long walkableSpans(rcHeightfield const& hf, int border)
@@ -1263,6 +1957,26 @@ namespace MMAP
                 return;
             }
             rcMergePolyMeshDetails(m_rcContext, dmmerge, nmerge, *iv.polyMeshDetail);
+
+            // join the floor the merge left open on the sub-tile lines (a vessel's model is left as it is)
+            if (!vesselDisplayId && iv.polyMesh->npolys)
+            {
+                std::vector<int> lines[2];
+                int border[2][2];
+                float const step = config.tileSize * config.cs;
+                for (int a = 0; a < 2; ++a)
+                {
+                    int const axis = a * 2;
+                    int const count = a ? subTilesY : subTilesX;
+                    float const origin = iv.polyMesh->bmin[axis];
+                    auto cell = [&](float w) { return int(std::floor((w - origin) / config.cs + 0.5f)); };
+                    border[a][0] = cell(config.bmin[axis]);
+                    border[a][1] = cell(config.bmin[axis] + count * step);
+                    for (int k = 1; k < count; ++k)
+                        lines[a].push_back(cell(config.bmin[axis] + k * step));
+                }
+                cuts.seams = joinSubTileSeams(*iv.polyMesh, *iv.polyMeshDetail, lines, border, config.walkableClimb);
+            }
 
             // free things up
             delete[] pmmerge;
