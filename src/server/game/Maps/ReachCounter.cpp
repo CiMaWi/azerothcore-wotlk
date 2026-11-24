@@ -17,10 +17,26 @@
 
 #include "ReachCounter.h"
 
+#include "AbstractFollower.h"
+#include "CombatManager.h"
+#include "Creature.h"
+#include "CreatureGroups.h"
+#include "DynamicObject.h"
+#include "Group.h"
+#include "GroupReference.h"
 #include "LightweightPerf.h"
 #include "Map.h"
+#include "MotionMaster.h"
+#include "MovementGenerator.h"
 #include "Object.h"
+#include "ObjectAccessor.h"
+#include "Player.h"
+#include "SpellAuras.h"
 #include "StringFormat.h"
+#include "TemporarySummon.h"
+#include "ThreatManager.h"
+#include "Unit.h"
+#include "Vehicle.h"
 
 #include <algorithm>
 #include <array>
@@ -68,6 +84,36 @@ constexpr char const* SiteNames[] = {"creature",
                                      "spawned_gameobject"};
 static_assert(std::size(SiteNames) == SiteCount);
 static_assert(SiteCount == LightweightPerf::ReachSiteCount);
+static_assert(LinkFamilyMax == LightweightPerf::LinkFamilyCount);
+
+constexpr char const* CoreLinkNames[] = {"link_victim",
+                                         "link_attacker",
+                                         "link_combat_pve",
+                                         "link_combat_pvp",
+                                         "link_threat",
+                                         "link_owner",
+                                         "link_charmer",
+                                         "link_charmed",
+                                         "link_controlled",
+                                         "link_pet",
+                                         "link_totem",
+                                         "link_guardian",
+                                         "link_vehicle",
+                                         "link_single_aura",
+                                         "link_aura_caster",
+                                         "link_dynobj",
+                                         "link_gameobj",
+                                         "link_follow",
+                                         "link_formation",
+                                         "link_combo",
+                                         "link_summoner",
+                                         "link_group_member",
+                                         "link_selection",
+                                         "link_viewpoint"};
+static_assert(std::size(CoreLinkNames) == LinkFamilyCoreCount);
+static_assert(LinkFamilyCoreCount <= LinkFamilyMax);
+
+constexpr std::size_t MaxLinkWalkers = 8;
 
 using Frames = std::array<std::uintptr_t, FrameCount>;
 using Key = std::pair<std::size_t, Frames>;
@@ -103,11 +149,22 @@ struct Buffer
     std::array<Hit, TaskHits> hits{};
     std::size_t hitCount = 0;
     std::uint64_t lost = 0;
+    // Zeroed when TaskTally first hands it out in this task, so a task without a census costs nothing
+    LinkTally links;
+    bool linksUsed = false;
 };
 
 thread_local Buffer taskBuffer;
 thread_local Buffer* currentTask = nullptr;
 thread_local WorldObject const* currentSubject = nullptr;
+
+// Module families and walkers: written at module init before the first map update, published by the counts; read
+// by the census and the snapshot
+std::mutex registryMutex;
+std::array<std::string, LinkFamilyMax - LinkFamilyCoreCount> moduleLinkNames;
+std::atomic<std::size_t> linkFamilies{LinkFamilyCoreCount};
+std::array<LinkWalker, MaxLinkWalkers> linkWalkers{};
+std::atomic<std::size_t> linkWalkerCount{0};
 
 std::mutex tableMutex;
 std::map<Key, Hit> table;
@@ -320,6 +377,7 @@ bool TaskScope::Begin(Map const* map)
     buffer.distant.fill(0);
     buffer.hitCount = 0;
     buffer.lost = 0;
+    buffer.linksUsed = false;
     currentSubject = nullptr;
     currentTask = &buffer;
     return true;
@@ -330,6 +388,23 @@ void TaskScope::End()
     Buffer const& buffer = taskBuffer;
     currentTask = nullptr;
     currentSubject = nullptr;
+
+    if (buffer.linksUsed)
+    {
+        std::array<LightweightPerf::Row, LinkFamilyMax> links{};
+        bool anyLink = false;
+        for (std::size_t family = 0; family < LinkFamilyMax; ++family)
+        {
+            if (!buffer.links.seen[family])
+                continue;
+            links[family].calls = buffer.links.seen[family];
+            links[family].total = buffer.links.distant[family];
+            links[family].maximum = static_cast<std::uint64_t>(buffer.links.farthest[family]);
+            anyLink = true;
+        }
+        if (anyLink)
+            LightweightPerf::MergeMapRows(buffer.mapId, LightweightPerf::LinkRows, links.data(), links.size());
+    }
 
     std::array<LightweightPerf::Row, SiteCount> rows{};
     bool any = false;
@@ -388,6 +463,182 @@ std::uint64_t TaskFarHits()
         for (std::uint64_t distant : task->distant)
             sum += distant;
     return sum;
+}
+
+std::atomic<bool> censusOn{false};
+
+void SetCensus(bool on) { censusOn.store(on, std::memory_order_relaxed); }
+
+LinkTally* TaskTally()
+{
+    Buffer* const task = currentTask;
+    if (!task)
+        return nullptr;
+
+    if (!task->linksUsed)
+    {
+        task->links = LinkTally();
+        task->linksUsed = true;
+    }
+    return &task->links;
+}
+
+std::size_t RegisterLinkFamily(char const* name)
+{
+    std::lock_guard<std::mutex> guard(registryMutex);
+    std::size_t const family = linkFamilies.load(std::memory_order_relaxed);
+    if (!name || family >= LinkFamilyMax)
+        return LinkFamilyMax;
+
+    moduleLinkNames[family - LinkFamilyCoreCount] = name;
+    linkFamilies.store(family + 1, std::memory_order_release);
+    return family;
+}
+
+char const* LinkFamilyName(std::size_t family)
+{
+    if (family < LinkFamilyCoreCount)
+        return CoreLinkNames[family];
+    if (family < linkFamilies.load(std::memory_order_acquire))
+        return moduleLinkNames[family - LinkFamilyCoreCount].c_str();
+    return nullptr;
+}
+
+void RegisterLinkWalker(LinkWalker walker)
+{
+    std::lock_guard<std::mutex> guard(registryMutex);
+    std::size_t const count = linkWalkerCount.load(std::memory_order_relaxed);
+    if (!walker || count >= MaxLinkWalkers)
+        return;
+
+    linkWalkers[count] = walker;
+    linkWalkerCount.store(count + 1, std::memory_order_release);
+}
+
+void CountLink(LinkTally& tally, std::size_t family, WorldObject const& subject, WorldObject const* other)
+{
+    if (!other || other == &subject || family >= LinkFamilyMax)
+        return;
+
+    // A link to another map is no reach; only an end on the subject's own map is read further
+    Map const* const map = subject.FindMap();
+    if (!map || other->FindMap() != map)
+        return;
+
+    ++tally.seen[family];
+    float const dx = other->GetPositionX() - subject.GetPositionX();
+    float const dy = other->GetPositionY() - subject.GetPositionY();
+    float const squared = dx * dx + dy * dy;
+    if (squared <= Cutoff * Cutoff)
+        return;
+
+    ++tally.distant[family];
+    tally.farthest[family] = std::max(tally.farthest[family], std::sqrt(squared));
+}
+
+void Census(Unit& unit, LinkAction action, LinkTally& tally)
+{
+    if (!unit.IsInWorld())
+        return;
+
+    Map* const map = unit.FindMap();
+    if (!map)
+        return;
+
+    // The census's own lookups are not the subject's: a null subject leaves them uncounted
+    Scope quiet(nullptr);
+    auto const link = [&](LinkFamily family, WorldObject const* other) { CountLink(tally, family, unit, other); };
+    auto const linkUnit = [&](LinkFamily family, ObjectGuid const& guid)
+    {
+        if (guid)
+            link(family, ObjectAccessor::GetUnit(unit, guid));
+    };
+    auto const linkObject = [&](LinkFamily family, ObjectGuid const& guid)
+    {
+        if (guid)
+            link(family, ObjectAccessor::GetWorldObject(unit, guid));
+    };
+
+    link(LinkVictim, unit.GetVictim());
+    for (Unit const* attacker : unit.getAttackers())
+        link(LinkAttacker, attacker);
+
+    CombatManager const& combat = unit.GetCombatManager();
+    for (auto const& [guid, reference] : combat.GetPvECombatRefs())
+        link(LinkCombatPvE, reference->GetOther(&unit));
+    for (auto const& [guid, reference] : combat.GetPvPCombatRefs())
+        link(LinkCombatPvP, reference->GetOther(&unit));
+
+    ThreatManager const& threat = unit.GetThreatMgr();
+    if (threat.GetThreatListSize())
+        for (ThreatReference const* reference : threat.GetUnsortedThreatList())
+            link(LinkThreat, reference->GetVictim());
+    for (auto const& [guid, reference] : threat.GetThreatenedByMeList())
+        link(LinkThreat, reference->GetOwner());
+
+    linkUnit(LinkOwner, unit.GetOwnerGUID());
+    linkUnit(LinkCharmer, unit.GetCharmerGUID());
+    linkUnit(LinkCharmed, unit.GetCharmGUID());
+    for (Unit const* controlled : unit.m_Controlled)
+    {
+        if (controlled->IsPet() || controlled->IsTotem())
+            continue;
+        link(controlled->HasUnitTypeMask(UNIT_MASK_GUARDIAN | UNIT_MASK_MINION) ? LinkGuardian : LinkControlled,
+             controlled);
+    }
+
+    linkUnit(LinkPet, unit.GetPetGUID());
+    for (std::size_t slot = SUMMON_SLOT_TOTEM_FIRE; slot < MAX_SUMMON_SLOT; ++slot)
+        linkUnit(LinkTotem, unit.m_SummonSlot[slot]);
+
+    link(LinkVehicle, unit.GetVehicleBase());
+    if (Vehicle const* kit = unit.GetVehicleKit())
+        for (auto const& [seatId, seat] : kit->Seats)
+            linkUnit(LinkVehicle, seat.Passenger.Guid);
+
+    for (Aura const* aura : unit.GetSingleCastAuras())
+        link(LinkSingleAura, aura->GetOwner());
+    for (auto const& [spellId, application] : unit.GetAppliedAuras())
+    {
+        ObjectGuid const caster = application->GetBase()->GetCasterGUID();
+        if (caster != unit.GetGUID())
+            linkObject(LinkAuraCaster, caster);
+    }
+
+    for (DynamicObject const* dynObject : unit.GetDynObjects())
+        link(LinkDynObj, dynObject);
+    for (ObjectGuid const& guid : unit.GetGameObjects())
+        link(LinkGameObj, map->GetGameObject(guid));
+
+    MotionMaster const* motion = unit.GetMotionMaster();
+    if (motion->GetCurrentMovementGeneratorType() == FOLLOW_MOTION_TYPE)
+        if (auto const* follower = dynamic_cast<AbstractFollower const*>(motion->top()))
+            link(LinkFollow, follower->GetTarget());
+
+    if (Creature const* creature = unit.ToCreature())
+        if (CreatureGroup const* formation = creature->GetFormation())
+            for (auto const& [member, info] : formation->GetMembers())
+                link(LinkFormation, member);
+
+    link(LinkCombo, unit.GetComboTarget());
+    for (Unit const* holder : unit.GetComboPointHolders())
+        link(LinkCombo, holder);
+
+    if (TempSummon const* summon = unit.ToTempSummon())
+        linkObject(LinkSummoner, summon->GetSummonerGUID());
+
+    if (Player const* player = unit.ToPlayer())
+    {
+        if (::Group const* group = player->GetGroup())
+            for (GroupReference const* member = group->GetFirstMember(); member; member = member->next())
+                link(LinkGroupMember, member->GetSource());
+        linkUnit(LinkSelection, player->GetTarget());
+        link(LinkViewpoint, player->GetSeer());
+    }
+
+    std::size_t const walkers = linkWalkerCount.load(std::memory_order_acquire);
+    for (std::size_t i = 0; i < walkers; ++i)
+        linkWalkers[i](unit, action, tally);
 }
 
 void Reset()

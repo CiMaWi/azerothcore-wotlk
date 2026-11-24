@@ -51,6 +51,8 @@ enum WorldPhase : std::size_t
 constexpr std::size_t MapSectionCount = 11;
 // ReachCounter::SiteCount, checked there
 constexpr std::size_t ReachSiteCount = 11;
+// ReachCounter::LinkFamilyMax (core and registered families), checked there
+constexpr std::size_t LinkFamilyCount = 32;
 
 // Why a non-player object is on a map's update list: the first reason that holds, in this order. Seen: a player
 // has it in view. Cell: a player's marked cells cover it, but no player sees it. The reasons after those keep an
@@ -129,7 +131,9 @@ enum MapRow : std::size_t
     LiveAiChecks,
     // Pair counters per ReachCounter::Site (calls = lookups made while a subject updates, total = far ones)
     ReachRows,
-    MapRowCount = ReachRows + ReachSiteCount
+    // Census per ReachCounter link family (calls = links seen, total = far ones, maximum = farthest far one in yd)
+    LinkRows = ReachRows + ReachSiteCount,
+    MapRowCount = LinkRows + LinkFamilyCount
 };
 
 bool Enabled();

@@ -80,9 +80,16 @@ public:
             { "setphaseshift",  HandleDebugSendSetPhaseShiftCommand,   rbac::RBAC_PERM_COMMAND_DEBUG,          Console::No },
             { "spellfail",      HandleDebugSendSpellFailCommand,       rbac::RBAC_PERM_COMMAND_DEBUG_COSMETIC, Console::No }
         };
+        static ChatCommandTable debugReachCensusCommandTable =
+        {
+            { "on",             HandleDebugReachCensusOnCommand,       rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes},
+            { "off",            HandleDebugReachCensusOffCommand,      rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes},
+            { "once",           HandleDebugReachCensusOnceCommand,     rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes}
+        };
         static ChatCommandTable debugReachCommandTable =
         {
             { "callers",        HandleDebugReachCallersCommand,        rbac::RBAC_PERM_COMMAND_DEBUG_INFO,     Console::Yes},
+            { "census",         debugReachCensusCommandTable },
             { "reset",          HandleDebugReachResetCommand,          rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes},
             { "test",           HandleDebugReachTestCommand,           rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes}
         };
@@ -1259,6 +1266,59 @@ public:
         handler->PSendSysMessage("reach test: {} -> {} map {} same map {} flat {:.1f} yd counter {} expected +{} "
                                  "counted +{}", subject->GetName(), target->GetName(), map->GetId(), sameMap,
                                  distance, ReachCounter::Enabled() ? "on" : "off", expected ? 1 : 0, counted);
+        return true;
+    }
+
+    // While on, every map pass on a continent takes the census of stored links, not only the sampled one
+    static bool HandleDebugReachCensusOnCommand(ChatHandler* handler)
+    {
+        ReachCounter::SetCensus(true);
+        handler->PSendSysMessage("reach census: every pass (counter {})", ReachCounter::Enabled() ? "on" : "off");
+        return true;
+    }
+
+    static bool HandleDebugReachCensusOffCommand(ChatHandler* handler)
+    {
+        ReachCounter::SetCensus(false);
+        handler->SendSysMessage("reach census: sampled pass only");
+        return true;
+    }
+
+    // The census of each named player's stored links, now: one line per family seen, then the totals
+    static bool HandleDebugReachCensusOnceCommand(ChatHandler* handler, PlayerIdentifier firstId,
+                                                  Optional<PlayerIdentifier> secondId)
+    {
+        std::array<Player*, 2> const players = {firstId.GetConnectedPlayer(),
+                                                secondId ? secondId->GetConnectedPlayer() : nullptr};
+        if (!players[0] || !players[0]->IsInWorld() || (secondId && (!players[1] || !players[1]->IsInWorld())))
+        {
+            handler->SendErrorMessage("reach census: every named player must be online and in the world");
+            return false;
+        }
+
+        for (Player* player : players)
+        {
+            if (!player)
+                continue;
+
+            ReachCounter::LinkTally tally;
+            ReachCounter::Census(*player, ReachCounter::LinkAction::Count, tally);
+            std::uint64_t seen = 0;
+            std::uint64_t distant = 0;
+            for (std::size_t family = 0; family < ReachCounter::LinkFamilyMax; ++family)
+            {
+                if (!tally.seen[family])
+                    continue;
+                char const* name = ReachCounter::LinkFamilyName(family);
+                handler->PSendSysMessage("reach census: {} {} seen {} far {} farthest {:.1f} yd", player->GetName(),
+                                         name ? name : "unnamed", tally.seen[family], tally.distant[family],
+                                         tally.farthest[family]);
+                seen += tally.seen[family];
+                distant += tally.distant[family];
+            }
+            handler->PSendSysMessage("reach census: {} total map {} seen {} far {}", player->GetName(),
+                                     player->GetMapId(), seen, distant);
+        }
         return true;
     }
 

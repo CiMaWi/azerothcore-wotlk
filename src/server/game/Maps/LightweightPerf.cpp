@@ -530,9 +530,16 @@ std::string Snapshot(bool reset, bool metricsEnabled)
         auto const& rows = result.maps[m].rows;
         for (std::size_t i = 0; i < MapRowCount; ++i)
         {
-            std::string const name = i < ReachRows
-                                         ? std::string(MapNames[i])
-                                         : std::string("count_reach_") + ReachCounter::SiteName(i - ReachRows);
+            std::string name;
+            if (i < ReachRows)
+                name = MapNames[i];
+            else if (i < LinkRows)
+                name = std::string("count_reach_") + ReachCounter::SiteName(i - ReachRows);
+            else if (char const* family = ReachCounter::LinkFamilyName(i - LinkRows))
+                name = std::string("count_") + family;
+            else
+                continue;
+
             WriteRow(out, first, "map/" + id + "/full/" + name, rows[i], i >= Players,
                      i >= WorkMaskUpdates && i < ReachRows && rows[Ai].calls);
         }

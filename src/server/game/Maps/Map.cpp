@@ -545,6 +545,8 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
     _updatableObjectListRecheckTimer.Update(t_diff);
     // The recheck update is also the perf sample (UpdateNonPlayerObjects): only it times unit phases and relocations
     bool const sample = _updatableObjectListRecheckTimer.Passed() && LightweightPerf::MapTimed();
+    // The census of stored links rides the sample (or the console switch); off, the flag test is all it costs
+    ReachCounter::LinkTally* const census = ReachCounter::CensusDue(sample) ? ReachCounter::TaskTally() : nullptr;
     resetMarkedCells();
     clock.Lap(MAP_SECTION_MARK_CELLS);
 
@@ -563,6 +565,8 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
             ReachCounter::Scope reach(player);
             player->Update(s_diff);
         }
+        if (census)
+            ReachCounter::Census(*player, ReachCounter::LinkAction::Count, *census);
         ++mapSectionStats.playerUpdates;
         clock.Lap(MAP_SECTION_PLAYER_UPDATE);
 
@@ -710,6 +714,7 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
         // The recheck pass is also the perf sample: only here are the cells near players marked, and one pass in
         // 30 s costs nothing
         bool const sampled = LightweightPerf::MapTimed();
+        ReachCounter::LinkTally* const census = ReachCounter::CensusDue(sampled) ? ReachCounter::TaskTally() : nullptr;
         // An object's current cell is open to Map only
         auto const cellMarked = [this](WorldObject* obj)
         {
@@ -728,6 +733,10 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
                 ++i;
                 continue;
             }
+
+            if (census)
+                if (Unit* unit = obj->ToUnit())
+                    ReachCounter::Census(*unit, ReachCounter::LinkAction::Count, *census);
 
             uint32 updateDiff = 0;
             ReachCounter::Scope reach(obj);
@@ -771,11 +780,16 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
     }
     else
     {
+        ReachCounter::LinkTally* const census = ReachCounter::CensusDue(false) ? ReachCounter::TaskTally() : nullptr;
         for (uint32 i = 0; i < _updatableObjectList.size(); ++i)
         {
             WorldObject* obj = _updatableObjectList[i];
             if (!obj->IsInWorld())
                 continue;
+
+            if (census)
+                if (Unit* unit = obj->ToUnit())
+                    ReachCounter::Census(*unit, ReachCounter::LinkAction::Count, *census);
 
             uint32 updateDiff = 0;
             if (TakeUpdateDiff(obj, diff, unseenInterval, updateDiff))
