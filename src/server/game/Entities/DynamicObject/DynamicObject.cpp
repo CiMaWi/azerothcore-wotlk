@@ -60,6 +60,7 @@ void DynamicObject::AddToWorld()
     ///- Register the dynamicObject for guid lookup and for caster
     if (!IsInWorld())
     {
+        ReachCounter::Shared(ReachCounter::SharedObjectStoreInsert);
         GetMap()->GetObjectsStore().Insert<DynamicObject>(GetGUID(), this);
 
         WorldObject::AddToWorld();
@@ -90,6 +91,7 @@ void DynamicObject::RemoveFromWorld()
 
         WorldObject::RemoveFromWorld();
 
+        ReachCounter::Shared(ReachCounter::SharedObjectStoreErase);
         GetMap()->GetObjectsStore().Remove<DynamicObject>(GetGUID());
     }
 }

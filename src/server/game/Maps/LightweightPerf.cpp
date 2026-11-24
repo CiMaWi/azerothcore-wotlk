@@ -345,6 +345,12 @@ void RecordMapSections(std::uint64_t const* sections, std::uint32_t players, std
 
 bool MapTimed() { return activeMap != nullptr; }
 
+std::uint64_t TaskElapsedNs()
+{
+    MapScope const* const scope = activeMap;
+    return scope ? Now() - scope->_start : 0;
+}
+
 void RecordObjectKinds(std::array<Row, ObjectKindCount> const& kinds)
 {
     if (!activeMap)
@@ -535,6 +541,10 @@ std::string Snapshot(bool reset, bool metricsEnabled)
                 name = MapNames[i];
             else if (i < LinkRows)
                 name = std::string("count_reach_") + ReachCounter::SiteName(i - ReachRows);
+            else if (i >= PacketFar)
+                name = "count_packet_far";
+            else if (i >= SharedRows)
+                name = std::string("count_") + ReachCounter::SharedName(i - SharedRows);
             else if (char const* family = ReachCounter::LinkFamilyName(i - LinkRows))
                 name = std::string("count_") + family;
             else

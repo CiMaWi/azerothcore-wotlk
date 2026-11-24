@@ -313,6 +313,7 @@ void Creature::AddToWorld()
         // it's also initialized in AIM_Initialize(), few lines below, but it's not a problem
         Motion_Initialize();
 
+        ReachCounter::Shared(ReachCounter::SharedObjectStoreInsert);
         GetMap()->GetObjectsStore().Insert<Creature>(GetGUID(), this);
         if (m_spawnId)
         {
@@ -360,6 +361,7 @@ void Creature::RemoveFromWorld()
         if (m_spawnId)
             Acore::Containers::MultimapErasePair(GetMap()->GetCreatureBySpawnIdStore(), m_spawnId, this);
 
+        ReachCounter::Shared(ReachCounter::SharedObjectStoreErase);
         GetMap()->GetObjectsStore().Remove<Creature>(GetGUID());
     }
 }

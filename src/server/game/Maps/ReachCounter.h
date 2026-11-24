@@ -26,6 +26,7 @@
 #include <vector>
 
 class Map;
+class Player;
 class Unit;
 class WorldObject;
 
@@ -124,6 +125,59 @@ private:
 
 // Far hits of this thread's open task scope so far, all sites; none open: 0
 std::uint64_t TaskFarHits();
+
+// Writes to the lists the whole map shares, counted while a map task runs on a continent; no task buffer on this
+// thread (world thread, instances): not counted. Row count_<SharedName>: calls = writes made while the task buffer
+// is open (inside a subject scope or not, e.g. the map's own timers), total = those made inside a subject scope,
+// the writes that would race once subjects update side by side
+enum SharedMember : std::size_t
+{
+    SharedObjectStoreInsert, // GetObjectsStore().Insert in AddToWorld (creature, pet, gameobject, dynobject, corpse)
+    SharedObjectStoreErase,  // GetObjectsStore().Remove in RemoveFromWorld
+    SharedUpdateListAdd,     // AddObjectToPendingUpdateList when it inserts, _AddObjectToUpdateList
+    SharedUpdateListRemove,  // _RemoveObjectFromUpdateList (the swap-remove), the pending erase
+    SharedRemoveList,        // Map::AddObjectToRemoveList
+    SharedMoveList,          // Add{Creature,GameObject,DynamicObject}ToMoveList when it appends
+    SharedUpdateObjects,     // Map::AddUpdateObject, Map::RemoveUpdateObject
+    SharedGuid,              // Map::GenerateLowGuid
+    SharedRespawn,           // Save/Remove{Creature,GO}RespawnTime
+    SharedGridCreated,       // MapGridManager::CreateGrid when it creates
+    SharedGridLoaded,        // MapGridManager::LoadGrid when it loads
+    SharedCollisionRebuild,  // BIHWrap::balance when it rebuilds (the map's dynamic collision tree)
+    SharedPathSearch,        // PathGenerator::CalculatePath on the map's own nav mesh query
+    SharedCount
+};
+
+// The row name without "count_" ("shared_guid")
+char const* SharedName(std::size_t member);
+// Out of line, called only while on
+void RecordShared(SharedMember member);
+
+inline void Shared(SharedMember member)
+{
+    if (Enabled())
+        RecordShared(member);
+}
+
+// A packet sent to a player's session while a subject updates (WorldSession::SendPacket). Row count_packet_far:
+// calls = packets to a player other than the subject, total = those to one on the task's map farther than Cutoff
+// (flat); far ones are filed with their caller and opcode like far hits
+void RecordPacket(Player const* target, std::uint32_t opcode);
+
+inline void CheckPacket(Player const* target, std::uint32_t opcode)
+{
+    if (Enabled())
+        RecordPacket(target, opcode);
+}
+
+// This thread's open task scope so far; none open: 0. inScope: only the writes made inside a subject scope
+std::uint64_t TaskShared(SharedMember member, bool inScope);
+// farOnly: only the far ones
+std::uint64_t TaskPackets(bool farOnly);
+
+// The sampled pass (Map::Update): from here until the task ends, the outermost subject scopes are timed per search
+// cell and the pass is appended to chunk-times.csv in the logs folder; without an open task buffer it does nothing
+void SampleCells();
 
 // The census of stored links: what a unit keeps of other objects (pointers and ids), by family. It walks the
 // families the map-change cleanup tears down (Unit::RemoveFromWorld, CleanupBeforeRemoveFromMap); batch E turns

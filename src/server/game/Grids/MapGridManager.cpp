@@ -1,12 +1,15 @@
 #include "MapGridManager.h"
 #include "GridObjectLoader.h"
 #include "GridTerrainLoader.h"
+#include "ReachCounter.h"
 
 void MapGridManager::CreateGrid(uint16 const x, uint16 const y)
 {
     std::lock_guard<std::mutex> guard(_gridLock);
     if (IsGridCreated(x, y))
         return;
+
+    ReachCounter::Shared(ReachCounter::SharedGridCreated);
 
     // If we are an instance, ensure parent map has already created the grid before proceeding.
     // Note: grid loading is locked and is safe across multiple map threads in the
@@ -35,6 +38,8 @@ bool MapGridManager::LoadGrid(uint16 const x, uint16 const y)
     MapGridType* grid = GetGrid(x, y);
     if (!grid || grid->IsObjectDataLoaded())
         return false;
+
+    ReachCounter::Shared(ReachCounter::SharedGridLoaded);
 
     // Must mark as loaded first, as GridObjectLoader spawning objects can attempt to recursively load the grid
     grid->SetObjectDataLoaded();

@@ -214,6 +214,7 @@ void GameObject::AddToWorld()
         if (m_zoneScript)
             m_zoneScript->OnGameObjectCreate(this);
 
+        ReachCounter::Shared(ReachCounter::SharedObjectStoreInsert);
         GetMap()->GetObjectsStore().Insert<GameObject>(GetGUID(), this);
         if (m_spawnId)
             GetMap()->GetGameObjectBySpawnIdStore().insert(std::make_pair(m_spawnId, this));
@@ -263,6 +264,7 @@ void GameObject::RemoveFromWorld()
 
         if (m_spawnId)
             Acore::Containers::MultimapErasePair(GetMap()->GetGameObjectBySpawnIdStore(), m_spawnId, this);
+        ReachCounter::Shared(ReachCounter::SharedObjectStoreErase);
         GetMap()->GetObjectsStore().Remove<GameObject>(GetGUID());
     }
 }

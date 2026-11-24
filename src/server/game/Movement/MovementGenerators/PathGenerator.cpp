@@ -239,6 +239,10 @@ bool PathGenerator::CalculatePath(float x, float y, float z, float destX, float 
         return true;
     }
 
+    // An owner's generator searches on its map's own query; one built on a caller's query has no source
+    if (_source)
+        ReachCounter::Shared(ReachCounter::SharedPathSearch);
+
     UpdateFilter();
 
     BuildPolyPath(start, dest);

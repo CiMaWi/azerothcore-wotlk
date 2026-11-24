@@ -25,6 +25,7 @@
 #include "DatabaseEnv.h"
 #include "Chat.h"
 #include "CommandScript.h"
+#include "GameTime.h"
 #include "GridNotifiersImpl.h"
 #include "GuildMgr.h"
 #include "ItemTemplate.h"
@@ -91,6 +92,7 @@ public:
             { "callers",        HandleDebugReachCallersCommand,        rbac::RBAC_PERM_COMMAND_DEBUG_INFO,     Console::Yes},
             { "census",         debugReachCensusCommandTable },
             { "reset",          HandleDebugReachResetCommand,          rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes},
+            { "shared",         HandleDebugReachSharedCommand,         rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes},
             { "test",           HandleDebugReachTestCommand,           rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes}
         };
         static ChatCommandTable debugCommandTable =
@@ -1266,6 +1268,52 @@ public:
         handler->PSendSysMessage("reach test: {} -> {} map {} same map {} flat {:.1f} yd counter {} expected +{} "
                                  "counted +{}", subject->GetName(), target->GetName(), map->GetId(), sameMap,
                                  distance, ReachCounter::Enabled() ? "on" : "off", expected ? 1 : 0, counted);
+        return true;
+    }
+
+    // One low guid taken from the subject's map and one packet sent to the target, as the subject's update would:
+    // on a continent shared_guid counts +1 (in scope too) and packet_far +1, far when both are on the same map
+    // farther apart than the cutoff (flat); with MapUpdate.ReachCounter off nothing counts. Burns one guid.
+    static bool HandleDebugReachSharedCommand(ChatHandler* handler, PlayerIdentifier subjectId,
+                                              PlayerIdentifier targetId)
+    {
+        Player* subject = subjectId.GetConnectedPlayer();
+        Player* target = targetId.GetConnectedPlayer();
+        if (!subject || !target || subject == target || !subject->IsInWorld() || !target->IsInWorld())
+        {
+            handler->SendErrorMessage("reach shared: two different players must be online and in the world");
+            return false;
+        }
+
+        Map* map = subject->GetMap();
+        bool const sameMap = target->FindMap() == map;
+        float const distance = std::hypot(target->GetPositionX() - subject->GetPositionX(),
+                                          target->GetPositionY() - subject->GetPositionY());
+        bool const counts = ReachCounter::Enabled() && ReachCounter::CountsMap(map);
+        bool const distant = counts && sameMap && distance > ReachCounter::Cutoff;
+        std::uint64_t guids = 0;
+        std::uint64_t guidsInScope = 0;
+        std::uint64_t packets = 0;
+        std::uint64_t packetsFar = 0;
+        {
+            ReachCounter::TaskScope task(map);
+            ReachCounter::Scope scope(subject);
+            map->GenerateLowGuid<HighGuid::Unit>();
+            // The client only refreshes its server time from it; bots ignore it
+            WorldPacket data(SMSG_QUERY_TIME_RESPONSE, 4 + 4);
+            data << uint32(GameTime::GetGameTime().count());
+            data << uint32(0);
+            target->GetSession()->SendPacket(&data);
+            guids = ReachCounter::TaskShared(ReachCounter::SharedGuid, false);
+            guidsInScope = ReachCounter::TaskShared(ReachCounter::SharedGuid, true);
+            packets = ReachCounter::TaskPackets(false);
+            packetsFar = ReachCounter::TaskPackets(true);
+        }
+        handler->PSendSysMessage("reach shared: {} -> {} map {} same map {} flat {:.1f} yd counter {} expected guid "
+                                 "+{} in scope +{} packet +{} far +{} counted guid +{} in scope +{} packet +{} far +{}",
+                                 subject->GetName(), target->GetName(), map->GetId(), sameMap, distance,
+                                 ReachCounter::Enabled() ? "on" : "off", counts ? 1 : 0, counts ? 1 : 0, counts ? 1 : 0,
+                                 distant ? 1 : 0, guids, guidsInScope, packets, packetsFar);
         return true;
     }
 

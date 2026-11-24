@@ -496,6 +496,12 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
 {
     // Off, or on a map other than the four continents, the reach scopes below cost a flag test
     ReachCounter::TaskScope reachTask(this);
+    // The pass that rechecks the update list is the perf sample (below): known here, before the timer moves, so the
+    // sessions' time also lands in their players' search cells
+    if (ReachCounter::Enabled() && LightweightPerf::MapTimed() &&
+        _updatableObjectListRecheckTimer.GetCurrent() + static_cast<time_t>(t_diff) >=
+            _updatableObjectListRecheckTimer.GetInterval())
+        ReachCounter::SampleCells();
     uint32 const players = m_mapRefMgr.getSize();
     bool const metrics = players && sMetric->IsEnabled();
     bool const timed = metrics || LightweightPerf::Enabled();
@@ -810,6 +816,7 @@ void Map::AddObjectToPendingUpdateList(WorldObject* obj)
     if (!mapUpdatableObject || mapUpdatableObject->GetUpdateState() != UpdatableMapObject::UpdateState::NotUpdating)
         return;
 
+    ReachCounter::Shared(ReachCounter::SharedUpdateListAdd);
     _pendingAddUpdatableObjectList.insert(obj);
     mapUpdatableObject->SetUpdateState(UpdatableMapObject::UpdateState::PendingAdd);
 }
@@ -823,6 +830,7 @@ void Map::_AddObjectToUpdateList(WorldObject* obj)
     mapUpdatableObject->SetUpdateState(UpdatableMapObject::UpdateState::Updating);
     mapUpdatableObject->SetMapUpdateListOffset(_updatableObjectList.size());
     mapUpdatableObject->_pendingUpdateDiff = 0;
+    ReachCounter::Shared(ReachCounter::SharedUpdateListAdd);
     _updatableObjectList.push_back(obj);
 }
 
@@ -832,6 +840,7 @@ void Map::_RemoveObjectFromUpdateList(WorldObject* obj)
     UpdatableMapObject* mapUpdatableObject = dynamic_cast<UpdatableMapObject*>(obj);
     ASSERT(mapUpdatableObject && mapUpdatableObject->GetUpdateState() == UpdatableMapObject::UpdateState::Updating);
 
+    ReachCounter::Shared(ReachCounter::SharedUpdateListRemove);
     if (obj != _updatableObjectList.back())
     {
         dynamic_cast<UpdatableMapObject*>(_updatableObjectList.back())->SetMapUpdateListOffset(mapUpdatableObject->GetMapUpdateListOffset());
@@ -850,7 +859,10 @@ void Map::RemoveObjectFromMapUpdateList(WorldObject* obj)
 
     UpdatableMapObject* mapUpdatableObject = dynamic_cast<UpdatableMapObject*>(obj);
     if (mapUpdatableObject->GetUpdateState() == UpdatableMapObject::UpdateState::PendingAdd)
+    {
+        ReachCounter::Shared(ReachCounter::SharedUpdateListRemove);
         _pendingAddUpdatableObjectList.erase(obj);
+    }
     else if (mapUpdatableObject->GetUpdateState() == UpdatableMapObject::UpdateState::Updating)
         _RemoveObjectFromUpdateList(obj);
 }
@@ -1137,7 +1149,10 @@ void Map::DynamicObjectRelocation(DynamicObject* dynObj, float x, float y, float
 void Map::AddCreatureToMoveList(Creature* c)
 {
     if (c->_moveState == MAP_OBJECT_CELL_MOVE_NONE)
+    {
+        ReachCounter::Shared(ReachCounter::SharedMoveList);
         _creaturesToMove.push_back(c);
+    }
     c->_moveState = MAP_OBJECT_CELL_MOVE_ACTIVE;
 }
 
@@ -1150,7 +1165,10 @@ void Map::RemoveCreatureFromMoveList(Creature* c)
 void Map::AddGameObjectToMoveList(GameObject* go)
 {
     if (go->_moveState == MAP_OBJECT_CELL_MOVE_NONE)
+    {
+        ReachCounter::Shared(ReachCounter::SharedMoveList);
         _gameObjectsToMove.push_back(go);
+    }
     go->_moveState = MAP_OBJECT_CELL_MOVE_ACTIVE;
 }
 
@@ -1163,7 +1181,10 @@ void Map::RemoveGameObjectFromMoveList(GameObject* go)
 void Map::AddDynamicObjectToMoveList(DynamicObject* dynObj)
 {
     if (dynObj->_moveState == MAP_OBJECT_CELL_MOVE_NONE)
+    {
+        ReachCounter::Shared(ReachCounter::SharedMoveList);
         _dynamicObjectsToMove.push_back(dynObj);
+    }
     dynObj->_moveState = MAP_OBJECT_CELL_MOVE_ACTIVE;
 }
 
@@ -2056,6 +2077,7 @@ void Map::AddObjectToRemoveList(WorldObject* obj)
 
     obj->CleanupsBeforeDelete(false);                            // remove or simplify at least cross referenced links
 
+    ReachCounter::Shared(ReachCounter::SharedRemoveList);
     i_objectsToRemove.insert(obj);
     //LOG_DEBUG("maps", "Object ({}) added to removing list.", obj->GetGUID().ToString());
 }
@@ -2728,6 +2750,7 @@ void Map::SaveCreatureRespawnTime(ObjectGuid::LowType spawnId, time_t& respawnTi
         respawnTime = now + YEAR;
 
     // Remove old queue entry if updating an existing respawn time
+    ReachCounter::Shared(ReachCounter::SharedRespawn);
     auto itr = _creatureRespawnTimes.find(spawnId);
     if (itr != _creatureRespawnTimes.end())
         _respawnQueue.erase({itr->second, SPAWN_TYPE_CREATURE, spawnId});
@@ -2745,6 +2768,7 @@ void Map::SaveCreatureRespawnTime(ObjectGuid::LowType spawnId, time_t& respawnTi
 
 void Map::RemoveCreatureRespawnTime(ObjectGuid::LowType spawnId)
 {
+    ReachCounter::Shared(ReachCounter::SharedRespawn);
     auto itr = _creatureRespawnTimes.find(spawnId);
     if (itr != _creatureRespawnTimes.end())
     {
@@ -2780,6 +2804,7 @@ void Map::SaveGORespawnTime(ObjectGuid::LowType spawnId, time_t& respawnTime)
         respawnTime = now + YEAR;
 
     // Remove old queue entry if updating an existing respawn time
+    ReachCounter::Shared(ReachCounter::SharedRespawn);
     auto itr = _goRespawnTimes.find(spawnId);
     if (itr != _goRespawnTimes.end())
         _respawnQueue.erase({itr->second, SPAWN_TYPE_GAMEOBJECT, spawnId});
@@ -2797,6 +2822,7 @@ void Map::SaveGORespawnTime(ObjectGuid::LowType spawnId, time_t& respawnTime)
 
 void Map::RemoveGORespawnTime(ObjectGuid::LowType spawnId)
 {
+    ReachCounter::Shared(ReachCounter::SharedRespawn);
     auto itr = _goRespawnTimes.find(spawnId);
     if (itr != _goRespawnTimes.end())
     {

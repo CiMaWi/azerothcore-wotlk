@@ -18,18 +18,22 @@
 #include "ReachCounter.h"
 
 #include "AbstractFollower.h"
+#include "BoundingIntervalHierarchyWrapper.h"
 #include "CombatManager.h"
 #include "Creature.h"
 #include "CreatureGroups.h"
 #include "DynamicObject.h"
+#include "GridDefines.h"
 #include "Group.h"
 #include "GroupReference.h"
 #include "LightweightPerf.h"
+#include "Log.h"
 #include "Map.h"
 #include "MotionMaster.h"
 #include "MovementGenerator.h"
 #include "Object.h"
 #include "ObjectAccessor.h"
+#include "Opcodes.h"
 #include "Player.h"
 #include "SpellAuras.h"
 #include "StringFormat.h"
@@ -40,6 +44,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <map>
@@ -86,6 +91,26 @@ static_assert(std::size(SiteNames) == SiteCount);
 static_assert(SiteCount == LightweightPerf::ReachSiteCount);
 static_assert(LinkFamilyMax == LightweightPerf::LinkFamilyCount);
 
+// Far packets are filed in the hit table under this site, one past the lookups
+constexpr std::size_t SitePacketFar = SiteCount;
+
+constexpr char const* SharedNames[] = {"shared_object_store_insert",
+                                       "shared_object_store_erase",
+                                       "shared_update_list_add",
+                                       "shared_update_list_remove",
+                                       "shared_remove_list",
+                                       "shared_move_list",
+                                       "shared_update_objects",
+                                       "shared_guid",
+                                       "shared_respawn",
+                                       "shared_grid_created",
+                                       "shared_grid_loaded",
+                                       "shared_collision_rebuild",
+                                       "shared_path_search"};
+static_assert(std::size(SharedNames) == SharedCount);
+static_assert(SharedCount == LightweightPerf::SharedMemberCount);
+static_assert(LightweightPerf::PacketFar == LightweightPerf::SharedRows + SharedCount);
+
 constexpr char const* CoreLinkNames[] = {"link_victim",
                                          "link_attacker",
                                          "link_combat_pve",
@@ -116,13 +141,15 @@ static_assert(LinkFamilyCoreCount <= LinkFamilyMax);
 constexpr std::size_t MaxLinkWalkers = 8;
 
 using Frames = std::array<std::uintptr_t, FrameCount>;
-using Key = std::pair<std::size_t, Frames>;
+// Site, frames, opcode (far packets; 0 for lookups)
+using Key = std::tuple<std::size_t, Frames, std::uint32_t>;
 
 // One caller's far hits, with the farthest one as the example
 struct Hit
 {
     std::size_t site = 0;
     Frames frames{};
+    std::uint32_t opcode = 0;
     std::uint64_t count = 0;
     float maximum = 0.0f;
     std::uint32_t mapId = 0;
@@ -140,18 +167,48 @@ struct Hit
     }
 };
 
+// One search cell's share of a sampled pass: the outermost subject scopes entered there
+struct CellTime
+{
+    std::uint64_t ns = 0;
+    std::uint32_t subjects = 0;
+    std::uint32_t players = 0;
+};
+
+// Search cells a pass usually touches: reserved once per thread, so the sampled pass rarely rehashes
+constexpr std::size_t CellsReserved = 1024;
+constexpr std::uint32_t LastCell = TOTAL_NUMBER_OF_CELLS_PER_MAP - 1;
+
+std::uint64_t Clock()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 struct Buffer
 {
     Map const* map = nullptr;
     std::uint32_t mapId = 0;
     std::array<std::uint64_t, SiteCount> calls{};
     std::array<std::uint64_t, SiteCount> distant{};
+    std::array<std::uint64_t, SharedCount> sharedCalls{};
+    std::array<std::uint64_t, SharedCount> sharedInScope{};
+    std::uint64_t packets = 0;
+    std::uint64_t packetsFar = 0;
     std::array<Hit, TaskHits> hits{};
     std::size_t hitCount = 0;
     std::uint64_t lost = 0;
     // Zeroed when TaskTally first hands it out in this task, so a task without a census costs nothing
     LinkTally links;
     bool linksUsed = false;
+    // The sampled pass (SampleCells): open subject scopes, the outermost one's cell and start, the cells so far
+    bool sampling = false;
+    std::uint32_t depth = 0;
+    std::uint32_t cell = 0;
+    bool player = false;
+    std::uint64_t entered = 0;
+    std::uint64_t start = 0;
+    std::unordered_map<std::uint32_t, CellTime> cells;
 };
 
 thread_local Buffer taskBuffer;
@@ -170,8 +227,18 @@ std::mutex tableMutex;
 std::map<Key, Hit> table;
 std::array<std::uint64_t, SiteCount> totalCalls{};
 std::array<std::uint64_t, SiteCount> totalFar{};
+std::uint64_t totalPackets = 0;
+std::uint64_t totalPacketsFar = 0;
 // Far hits counted but not filed under a caller: a task's or the shared table was full
 std::uint64_t lostHits = 0;
+
+// chunk-times.csv: truncated and headed by the first write of the process (or after a reset), numbered per map
+std::mutex cellsMutex;
+bool cellsFileOpened = false;
+std::unordered_map<std::uint32_t, std::uint64_t> cellPasses;
+std::uint64_t cellPassesWritten = 0;
+// Passes whose cells summed to more than the pass (the remainder clamped at 0)
+std::uint64_t cellClamps = 0;
 
 char const* TypeName(std::uint8_t type)
 {
@@ -198,12 +265,14 @@ struct Frame
     bool wrapper = false;
 };
 
-// The lookups themselves and their wrappers: the report names the code above them
+// The lookups themselves, the send function and their wrappers: the report names the code above them
 bool IsWrapper(std::string const& function)
 {
     static constexpr char const* Prefixes[] = {"ReachCounter::", "ObjectAccessor::Get", "ObjectAccessor::Find"};
-    static constexpr char const* Leaves[] = {"Map::GetCreature", "Map::GetGameObject",     "Map::GetPet",
-                                             "Map::GetCorpse",   "Map::GetDynamicObject", "Map::GetTransport"};
+    static constexpr char const* Leaves[] = {"Map::GetCreature",         "Map::GetGameObject",
+                                             "Map::GetPet",              "Map::GetCorpse",
+                                             "Map::GetDynamicObject",    "Map::GetTransport",
+                                             "WorldSession::SendPacket", "Player::SendDirectMessage"};
     for (char const* prefix : Prefixes)
         if (function.rfind(prefix, 0) == 0)
             return true;
@@ -295,16 +364,86 @@ private:
 struct Group
 {
     std::size_t site = 0;
+    std::uint32_t opcode = 0;
     std::string caller;
     std::string next;
     Hit best;
     std::uint64_t count = 0;
 };
+
+// A hit of the open task: merged with an earlier one of the same caller, else filed while there is room
+void File(Buffer& task, Hit const& hit)
+{
+    for (std::size_t i = 0; i < task.hitCount; ++i)
+    {
+        Hit& filed = task.hits[i];
+        if (filed.site == hit.site && filed.opcode == hit.opcode && filed.frames == hit.frames)
+        {
+            filed.Merge(hit);
+            return;
+        }
+    }
+    if (task.hitCount < TaskHits)
+        task.hits[task.hitCount++] = hit;
+    else
+        ++task.lost;
+}
+
+void CollisionRebuilt() { Shared(SharedCollisionRebuild); }
+
+std::string OpcodeText(Group const& group)
+{
+    return group.site == SitePacketFar ? GetOpcodeNameForLogging(static_cast<Opcodes>(group.opcode)) : std::string();
+}
+
+// One sampled pass: a line per search cell and the time outside every subject scope as cell -1,-1. taskNs is the
+// enclosing MapScope's time, the independent number the cells and the remainder are checked against
+void WriteCells(Buffer const& buffer, std::uint64_t passNs, std::uint64_t taskNs)
+{
+    std::uint64_t inCells = 0;
+    for (auto const& [key, cell] : buffer.cells)
+        inCells += cell.ns;
+    bool const clamped = inCells > passNs;
+    std::uint64_t const remainder = clamped ? 0 : passNs - inCells;
+
+    std::lock_guard<std::mutex> guard(cellsMutex);
+    std::uint64_t const pass = ++cellPasses[buffer.mapId];
+    std::string text;
+    text.reserve((buffer.cells.size() + 2) * 48);
+    if (!cellsFileOpened)
+        text += "map,pass,cell_x,cell_y,ns,subjects,players,task_ns\n";
+    for (auto const& [key, cell] : buffer.cells)
+        text += Acore::StringFormat("{},{},{},{},{},{},{},{}\n", buffer.mapId, pass, key >> 16, key & 0xFFFF, cell.ns,
+                                    cell.subjects, cell.players, taskNs);
+    text += Acore::StringFormat("{},{},-1,-1,{},0,0,{}\n", buffer.mapId, pass, remainder, taskNs);
+
+    std::ofstream file(sLog->GetLogsDir() + "chunk-times.csv", cellsFileOpened ? std::ios::app : std::ios::trunc);
+    if (!file)
+        return;
+    file << text;
+    cellsFileOpened = true;
+    ++cellPassesWritten;
+    if (clamped)
+        ++cellClamps;
+}
 }  // namespace
 
-void Configure(bool on) { active.store(on, std::memory_order_relaxed); }
+void Configure(bool on)
+{
+    // Set at the first configuration, before any map update, and never changed after: map threads read it unlocked
+    if (BIHRebuildHook != &CollisionRebuilt)
+        BIHRebuildHook = &CollisionRebuilt;
+    active.store(on, std::memory_order_relaxed);
+}
 
-char const* SiteName(std::size_t site) { return site < SiteCount ? SiteNames[site] : "unknown"; }
+char const* SiteName(std::size_t site)
+{
+    if (site < SiteCount)
+        return SiteNames[site];
+    return site == SitePacketFar ? "packet_far" : "unknown";
+}
+
+char const* SharedName(std::size_t member) { return member < SharedCount ? SharedNames[member] : "unknown"; }
 
 bool CountsMap(Map const* map)
 {
@@ -349,20 +488,56 @@ void Record(Site site, WorldObject const* found)
     hit.subjectEntry = subject->GetEntry();
     hit.foundType = static_cast<std::uint8_t>(found->GetTypeId());
     hit.foundEntry = found->GetEntry();
+    File(*task, hit);
+}
 
-    for (std::size_t i = 0; i < task->hitCount; ++i)
-    {
-        Hit& filed = task->hits[i];
-        if (filed.site == hit.site && filed.frames == hit.frames)
-        {
-            filed.Merge(hit);
-            return;
-        }
-    }
-    if (task->hitCount < TaskHits)
-        task->hits[task->hitCount++] = hit;
-    else
-        ++task->lost;
+void RecordShared(SharedMember member)
+{
+    Buffer* const task = currentTask;
+    if (!task || member >= SharedCount)
+        return;
+
+    ++task->sharedCalls[member];
+    if (currentSubject)
+        ++task->sharedInScope[member];
+}
+
+void RecordPacket(Player const* target, std::uint32_t opcode)
+{
+    Buffer* const task = currentTask;
+    WorldObject const* const subject = currentSubject;
+    if (!task || !subject || !target || target == subject)
+        return;
+
+    ++task->packets;
+    // A player on another map (or between maps) is no reach
+    if (target->FindMap() != task->map)
+        return;
+
+    float const dx = target->GetPositionX() - subject->GetPositionX();
+    float const dy = target->GetPositionY() - subject->GetPositionY();
+    float const squared = dx * dx + dy * dy;
+    if (squared <= Cutoff * Cutoff)
+        return;
+
+    ++task->packetsFar;
+    Hit hit;
+    hit.site = SitePacketFar;
+    hit.opcode = opcode;
+#ifdef _WIN32
+    void* raw[FrameCount] = {};
+    USHORT const captured = CaptureStackBackTrace(1, static_cast<DWORD>(FrameCount), raw, nullptr);
+    for (USHORT i = 0; i < captured; ++i)
+        hit.frames[i] = reinterpret_cast<std::uintptr_t>(raw[i]);
+#endif
+    hit.count = 1;
+    hit.maximum = std::sqrt(squared);
+    hit.mapId = task->mapId;
+    hit.subjectType = static_cast<std::uint8_t>(subject->GetTypeId());
+    hit.subjectEntry = subject->GetEntry();
+    hit.foundType = static_cast<std::uint8_t>(target->GetTypeId());
+    hit.foundEntry = target->GetEntry();
+    File(*task, hit);
 }
 
 bool TaskScope::Begin(Map const* map)
@@ -375,9 +550,15 @@ bool TaskScope::Begin(Map const* map)
     buffer.mapId = map->GetId();
     buffer.calls.fill(0);
     buffer.distant.fill(0);
+    buffer.sharedCalls.fill(0);
+    buffer.sharedInScope.fill(0);
+    buffer.packets = 0;
+    buffer.packetsFar = 0;
     buffer.hitCount = 0;
     buffer.lost = 0;
     buffer.linksUsed = false;
+    buffer.sampling = false;
+    buffer.depth = 0;
     currentSubject = nullptr;
     currentTask = &buffer;
     return true;
@@ -388,6 +569,18 @@ void TaskScope::End()
     Buffer const& buffer = taskBuffer;
     currentTask = nullptr;
     currentSubject = nullptr;
+
+    // The pass's clocks first, so the file and the merges below stay outside it
+    if (buffer.sampling)
+    {
+        std::uint64_t const passNs = Clock() - buffer.start;
+        std::uint64_t const taskNs = LightweightPerf::TaskElapsedNs();
+        WriteCells(buffer, passNs, taskNs);
+        // Emptied here, outside the pass's clock: freeing a pass's cells takes tens of microseconds
+        taskBuffer.cells.clear();
+        if (taskBuffer.cells.bucket_count() < CellsReserved)
+            taskBuffer.cells.reserve(CellsReserved);
+    }
 
     if (buffer.linksUsed)
     {
@@ -417,10 +610,33 @@ void TaskScope::End()
         rows[site].maximum = buffer.distant[site] ? 1 : 0;
         any = true;
     }
-    if (!any)
-        return;
+    if (any)
+        LightweightPerf::MergeMapRows(buffer.mapId, LightweightPerf::ReachRows, rows.data(), rows.size());
 
-    LightweightPerf::MergeMapRows(buffer.mapId, LightweightPerf::ReachRows, rows.data(), rows.size());
+    // The shared rows and, right behind them, the far packet row
+    std::array<LightweightPerf::Row, SharedCount + 1> shared{};
+    bool anyShared = false;
+    for (std::size_t member = 0; member < SharedCount; ++member)
+    {
+        if (!buffer.sharedCalls[member])
+            continue;
+        shared[member].calls = buffer.sharedCalls[member];
+        shared[member].total = buffer.sharedInScope[member];
+        shared[member].maximum = buffer.sharedInScope[member] ? 1 : 0;
+        anyShared = true;
+    }
+    if (buffer.packets)
+    {
+        shared[SharedCount].calls = buffer.packets;
+        shared[SharedCount].total = buffer.packetsFar;
+        shared[SharedCount].maximum = buffer.packetsFar ? 1 : 0;
+        anyShared = true;
+    }
+    if (anyShared)
+        LightweightPerf::MergeMapRows(buffer.mapId, LightweightPerf::SharedRows, shared.data(), shared.size());
+
+    if (!any && !buffer.packets)
+        return;
 
     std::lock_guard<std::mutex> guard(tableMutex);
     for (std::size_t site = 0; site < SiteCount; ++site)
@@ -428,11 +644,13 @@ void TaskScope::End()
         totalCalls[site] += buffer.calls[site];
         totalFar[site] += buffer.distant[site];
     }
+    totalPackets += buffer.packets;
+    totalPacketsFar += buffer.packetsFar;
     lostHits += buffer.lost;
     for (std::size_t i = 0; i < buffer.hitCount; ++i)
     {
         Hit const& hit = buffer.hits[i];
-        Key const key(hit.site, hit.frames);
+        Key const key(hit.site, hit.frames, hit.opcode);
         auto const filed = table.find(key);
         if (filed != table.end())
             filed->second.Merge(hit);
@@ -450,10 +668,44 @@ bool Scope::Enter(WorldObject const* subject, WorldObject const*& previous)
 
     previous = currentSubject;
     currentSubject = subject;
+    // While sampling, the outermost scope times its subject under the search cell it starts in; inner ones add nothing
+    Buffer* const task = currentTask;
+    if (!task->depth++ && task->sampling && subject)
+    {
+        CellCoord const cell = Acore::ComputeCellCoord(subject->GetPositionX(), subject->GetPositionY());
+        task->cell = (std::min(cell.x_coord, LastCell) << 16) | std::min(cell.y_coord, LastCell);
+        task->player = subject->IsPlayer();
+        task->entered = Clock();
+    }
     return true;
 }
 
-void Scope::Leave(WorldObject const* previous) { currentSubject = previous; }
+void Scope::Leave(WorldObject const* previous)
+{
+    currentSubject = previous;
+    Buffer* const task = currentTask;
+    if (!task || !task->depth || --task->depth || !task->entered)
+        return;
+
+    CellTime& cell = task->cells[task->cell];
+    cell.ns += Clock() - task->entered;
+    ++cell.subjects;
+    if (task->player)
+        ++cell.players;
+    task->entered = 0;
+}
+
+void SampleCells()
+{
+    Buffer* const task = currentTask;
+    if (!task || task->sampling || task->depth)
+        return;
+
+    // The cells were emptied when the previous sampled pass of this thread ended
+    task->entered = 0;
+    task->sampling = true;
+    task->start = Clock();
+}
 
 std::uint64_t TaskFarHits()
 {
@@ -463,6 +715,22 @@ std::uint64_t TaskFarHits()
         for (std::uint64_t distant : task->distant)
             sum += distant;
     return sum;
+}
+
+std::uint64_t TaskShared(SharedMember member, bool inScope)
+{
+    Buffer const* const task = currentTask;
+    if (!task || member >= SharedCount)
+        return 0;
+    return inScope ? task->sharedInScope[member] : task->sharedCalls[member];
+}
+
+std::uint64_t TaskPackets(bool farOnly)
+{
+    Buffer const* const task = currentTask;
+    if (!task)
+        return 0;
+    return farOnly ? task->packetsFar : task->packets;
 }
 
 std::atomic<bool> censusOn{false};
@@ -647,7 +915,16 @@ void Reset()
     table.clear();
     totalCalls.fill(0);
     totalFar.fill(0);
+    totalPackets = 0;
+    totalPacketsFar = 0;
     lostHits = 0;
+
+    // chunk-times.csv starts over with the next sampled pass
+    std::lock_guard<std::mutex> cellsGuard(cellsMutex);
+    cellsFileOpened = false;
+    cellPasses.clear();
+    cellPassesWritten = 0;
+    cellClamps = 0;
 }
 
 std::vector<std::string> Report(std::size_t top, std::string const& tsvPath)
@@ -655,6 +932,8 @@ std::vector<std::string> Report(std::size_t top, std::string const& tsvPath)
     std::vector<Hit> hits;
     std::array<std::uint64_t, SiteCount> calls{};
     std::array<std::uint64_t, SiteCount> distant{};
+    std::uint64_t packets = 0;
+    std::uint64_t packetsFar = 0;
     std::uint64_t lost = 0;
     {
         std::lock_guard<std::mutex> guard(tableMutex);
@@ -663,11 +942,13 @@ std::vector<std::string> Report(std::size_t top, std::string const& tsvPath)
             hits.push_back(hit);
         calls = totalCalls;
         distant = totalFar;
+        packets = totalPackets;
+        packetsFar = totalPacketsFar;
         lost = lostHits;
     }
 
-    // Entries that resolve to the same two callers are one line
-    std::map<std::tuple<std::size_t, std::string, std::string>, Group> groups;
+    // Entries that resolve to the same two callers (and opcode) are one line
+    std::map<std::tuple<std::size_t, std::uint32_t, std::string, std::string>, Group> groups;
     {
         Resolver resolver;
         for (Hit const& hit : hits)
@@ -683,10 +964,11 @@ std::vector<std::string> Report(std::size_t top, std::string const& tsvPath)
                     callers[found++] = frame.text;
             }
 
-            Group& group = groups[std::make_tuple(hit.site, callers[0], callers[1])];
+            Group& group = groups[std::make_tuple(hit.site, hit.opcode, callers[0], callers[1])];
             if (!group.count || hit.maximum > group.best.maximum)
                 group.best = hit;
             group.site = hit.site;
+            group.opcode = hit.opcode;
             group.caller = callers[0];
             group.next = callers[1];
             group.count += hit.count;
@@ -704,30 +986,38 @@ std::vector<std::string> Report(std::size_t top, std::string const& tsvPath)
     for (std::size_t site = 0; site < SiteCount; ++site)
         if (calls[site])
             sites += Acore::StringFormat(" {} {}/{}", SiteNames[site], distant[site], calls[site]);
-    lines.push_back(Acore::StringFormat("reach: far/lookups by site:{}; unfiled far hits {}; {} callers",
-                                        sites.empty() ? " none" : sites, lost, ranked.size()));
+    lines.push_back(Acore::StringFormat("reach: far/lookups by site:{}; packets far/sent {}/{}; unfiled far hits {}; "
+                                        "{} callers",
+                                        sites.empty() ? " none" : sites, packetsFar, packets, lost, ranked.size()));
 
     std::ofstream tsv(tsvPath, std::ios::trunc);
     if (tsv)
-        tsv << "count\tsite\tmax_yd\tcaller\tnext_caller\tmap\tsubject_type\tsubject_entry\tfound_type\tfound_entry\n";
+        tsv << "count\tsite\tmax_yd\tcaller\tnext_caller\tmap\tsubject_type\tsubject_entry\tfound_type\tfound_entry"
+               "\topcode\n";
     for (std::size_t i = 0; i < ranked.size(); ++i)
     {
         Group const& group = *ranked[i];
         Hit const& best = group.best;
+        std::string const opcode = OpcodeText(group);
         if (tsv)
-            tsv << group.count << '\t' << SiteNames[group.site] << '\t' << static_cast<std::uint32_t>(best.maximum)
+            tsv << group.count << '\t' << SiteName(group.site) << '\t' << static_cast<std::uint32_t>(best.maximum)
                 << '\t' << group.caller << '\t' << group.next << '\t' << best.mapId << '\t'
                 << TypeName(best.subjectType) << '\t' << best.subjectEntry << '\t' << TypeName(best.foundType)
-                << '\t' << best.foundEntry << '\n';
+                << '\t' << best.foundEntry << '\t' << opcode << '\n';
         if (i < top)
-            lines.push_back(Acore::StringFormat("{} x {} max {:.0f} yd: {} <- {} (map {}: {} {} -> {} {})",
-                                                group.count, SiteNames[group.site], best.maximum, group.caller,
-                                                group.next.empty() ? "-" : group.next, best.mapId,
-                                                TypeName(best.subjectType), best.subjectEntry,
+            lines.push_back(Acore::StringFormat("{} x {}{}{} max {:.0f} yd: {} <- {} (map {}: {} {} -> {} {})",
+                                                group.count, SiteName(group.site), opcode.empty() ? "" : " ", opcode,
+                                                best.maximum, group.caller, group.next.empty() ? "-" : group.next,
+                                                best.mapId, TypeName(best.subjectType), best.subjectEntry,
                                                 TypeName(best.foundType), best.foundEntry));
     }
     lines.push_back(tsv ? Acore::StringFormat("reach: table written to {}", tsvPath)
                         : Acore::StringFormat("reach: could not write {}", tsvPath));
+    {
+        std::lock_guard<std::mutex> guard(cellsMutex);
+        lines.push_back(Acore::StringFormat("reach: chunk-times.csv {} sampled passes, {} clamped", cellPassesWritten,
+                                            cellClamps));
+    }
     return lines;
 }
 }  // namespace ReachCounter

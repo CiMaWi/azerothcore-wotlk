@@ -53,6 +53,8 @@ constexpr std::size_t MapSectionCount = 11;
 constexpr std::size_t ReachSiteCount = 11;
 // ReachCounter::LinkFamilyMax (core and registered families), checked there
 constexpr std::size_t LinkFamilyCount = 32;
+// ReachCounter::SharedCount, checked there
+constexpr std::size_t SharedMemberCount = 13;
 
 // Why a non-player object is on a map's update list: the first reason that holds, in this order. Seen: a player
 // has it in view. Cell: a player's marked cells cover it, but no player sees it. The reasons after those keep an
@@ -133,7 +135,11 @@ enum MapRow : std::size_t
     ReachRows,
     // Census per ReachCounter link family (calls = links seen, total = far ones, maximum = farthest far one in yd)
     LinkRows = ReachRows + ReachSiteCount,
-    MapRowCount = LinkRows + LinkFamilyCount
+    // Pair counters per ReachCounter::SharedMember (calls = writes during the task, total = inside a subject scope)
+    SharedRows = LinkRows + LinkFamilyCount,
+    // Pair counter (calls = packets from a subject scope to another player, total = far ones)
+    PacketFar = SharedRows + SharedMemberCount,
+    MapRowCount
 };
 
 bool Enabled();
@@ -143,6 +149,8 @@ void SetMapQueuedAt(std::uint64_t queuedAt);
 void RecordMapSections(std::uint64_t const* sections, std::uint32_t players, std::uint32_t playerUpdates);
 // True while a timed map task runs on this thread
 bool MapTimed();
+// Nanoseconds since this thread's timed map task began; none: 0
+std::uint64_t TaskElapsedNs();
 // One sampled pass over a map's update list: per ObjectKind the objects and their update time (ns)
 void RecordObjectKinds(std::array<Row, ObjectKindCount> const& kinds);
 // Files the time since the previous lap of the current UnitScope under the phase; no scope: returns
@@ -167,6 +175,8 @@ public:
     void Merge(std::size_t row, Row const& other) { _rows[row].Merge(other); }
 
 private:
+    friend std::uint64_t TaskElapsedNs();
+
     bool _on;
     bool _cpuValid = false;
     std::uint32_t _mapId;

@@ -46,6 +46,7 @@
 #include "Player.h"
 #include "Realm.h"
 #include "QueryHolder.h"
+#include "ReachCounter.h"
 #include "ScriptMgr.h"
 #include "SocialMgr.h"
 #include "Transport.h"
@@ -308,6 +309,8 @@ ObjectGuid::LowType WorldSession::GetGuidLow() const
 /// Send a packet to the client
 void WorldSession::SendPacket(WorldPacket const* packet)
 {
+    // Bots have no socket and come through here too
+    ReachCounter::CheckPacket(GetPlayer(), packet->GetOpcode());
     sScriptMgr->OnPacketSent(this, *packet);
 
     if (!m_Socket)
