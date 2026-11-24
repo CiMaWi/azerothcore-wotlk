@@ -27,6 +27,7 @@
 #include "ObjectMgr.h"
 #include "Pet.h"
 #include "Player.h"
+#include "ReachCounter.h"
 #include "Transport.h"
 
 template<class T>
@@ -243,11 +244,12 @@ Pet* ObjectAccessor::GetPet(WorldObject const& u, ObjectGuid const& guid)
 
 Player* ObjectAccessor::GetPlayer(Map const* m, ObjectGuid const& guid)
 {
-    if (Player * player = HashMapHolder<Player>::Find(guid))
-        if (player->IsInWorld() && player->GetMap() == m)
-            return player;
+    Player* player = HashMapHolder<Player>::Find(guid);
+    if (player && (!player->IsInWorld() || player->GetMap() != m))
+        player = nullptr;
 
-    return nullptr;
+    ReachCounter::Check(ReachCounter::SitePlayerOnMap, player);
+    return player;
 }
 
 Player* ObjectAccessor::GetPlayer(WorldObject const& u, ObjectGuid const& guid)
@@ -269,7 +271,11 @@ Creature* ObjectAccessor::GetCreatureOrPetOrVehicle(WorldObject const& u, Object
 Player* ObjectAccessor::FindPlayer(ObjectGuid const guid)
 {
     Player* player = HashMapHolder<Player>::Find(guid);
-    return player && player->IsInWorld() ? player : nullptr;
+    if (player && !player->IsInWorld())
+        player = nullptr;
+
+    ReachCounter::Check(ReachCounter::SiteFindPlayer, player);
+    return player;
 }
 
 Player* ObjectAccessor::FindPlayerByLowGUID(ObjectGuid::LowType lowguid)
@@ -280,7 +286,9 @@ Player* ObjectAccessor::FindPlayerByLowGUID(ObjectGuid::LowType lowguid)
 
 Player* ObjectAccessor::FindConnectedPlayer(ObjectGuid const guid)
 {
-    return HashMapHolder<Player>::Find(guid);
+    Player* player = HashMapHolder<Player>::Find(guid);
+    ReachCounter::Check(ReachCounter::SiteFindConnectedPlayer, player);
+    return player;
 }
 
 void ObjectAccessor::SaveAllPlayers()
@@ -294,11 +302,12 @@ void ObjectAccessor::SaveAllPlayers()
 
 Player* ObjectAccessor::FindPlayerByName(std::string const& name, bool checkInWorld)
 {
-    if (Player* player = PlayerNameMapHolder::Find(name))
-        if (!checkInWorld || player->IsInWorld())
-            return player;
+    Player* player = PlayerNameMapHolder::Find(name);
+    if (player && checkInWorld && !player->IsInWorld())
+        player = nullptr;
 
-    return nullptr;
+    ReachCounter::Check(ReachCounter::SiteFindPlayerByName, player);
+    return player;
 }
 
 /**
@@ -309,22 +318,16 @@ Player* ObjectAccessor::FindPlayerByName(std::string const& name, bool checkInWo
  */
 Creature* ObjectAccessor::GetSpawnedCreatureByDBGUID(uint32 mapId, uint64 guid)
 {
+    Creature* creature = nullptr;
     if (Map* map = sMapMgr->FindBaseMap(mapId))
     {
         auto bounds = map->GetCreatureBySpawnIdStore().equal_range(guid);
-
-        if (bounds.first == bounds.second)
-        {
-            return nullptr;
-        }
-
-        if (Creature* creature = bounds.first->second)
-        {
-            return creature;
-        }
+        if (bounds.first != bounds.second)
+            creature = bounds.first->second;
     }
 
-    return nullptr;
+    ReachCounter::Check(ReachCounter::SiteSpawnedCreature, creature);
+    return creature;
 }
 
 /**
@@ -335,22 +338,16 @@ Creature* ObjectAccessor::GetSpawnedCreatureByDBGUID(uint32 mapId, uint64 guid)
  */
 GameObject* ObjectAccessor::GetSpawnedGameObjectByDBGUID(uint32 mapId, uint64 guid)
 {
+    GameObject* go = nullptr;
     if (Map* map = sMapMgr->FindBaseMap(mapId))
     {
         auto bounds = map->GetGameObjectBySpawnIdStore().equal_range(guid);
-
-        if (bounds.first == bounds.second)
-        {
-            return nullptr;
-        }
-
-        if (GameObject* go = bounds.first->second)
-        {
-            return go;
-        }
+        if (bounds.first != bounds.second)
+            go = bounds.first->second;
     }
 
-    return nullptr;
+    ReachCounter::Check(ReachCounter::SiteSpawnedGameObject, go);
+    return go;
 }
 
 template<>

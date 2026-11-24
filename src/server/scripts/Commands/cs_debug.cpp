@@ -25,6 +25,7 @@
 #include "DatabaseEnv.h"
 #include "Chat.h"
 #include "CommandScript.h"
+#include "GameTime.h"
 #include "GridNotifiersImpl.h"
 #include "GuildMgr.h"
 #include "ItemTemplate.h"
@@ -39,10 +40,12 @@
 #include "PoolMgr.h"
 #include "RBAC.h"
 #include "RaceMgr.h"
+#include "ReachCounter.h"
 #include "ScriptMgr.h"
 #include "Transport.h"
 #include "Warden.h"
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <map>
 #include <set>
@@ -78,6 +81,20 @@ public:
             { "setphaseshift",  HandleDebugSendSetPhaseShiftCommand,   rbac::RBAC_PERM_COMMAND_DEBUG,          Console::No },
             { "spellfail",      HandleDebugSendSpellFailCommand,       rbac::RBAC_PERM_COMMAND_DEBUG_COSMETIC, Console::No }
         };
+        static ChatCommandTable debugReachCensusCommandTable =
+        {
+            { "on",             HandleDebugReachCensusOnCommand,       rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes},
+            { "off",            HandleDebugReachCensusOffCommand,      rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes},
+            { "once",           HandleDebugReachCensusOnceCommand,     rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes}
+        };
+        static ChatCommandTable debugReachCommandTable =
+        {
+            { "callers",        HandleDebugReachCallersCommand,        rbac::RBAC_PERM_COMMAND_DEBUG_INFO,     Console::Yes},
+            { "census",         debugReachCensusCommandTable },
+            { "reset",          HandleDebugReachResetCommand,          rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes},
+            { "shared",         HandleDebugReachSharedCommand,         rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes},
+            { "test",           HandleDebugReachTestCommand,           rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes}
+        };
         static ChatCommandTable debugCommandTable =
         {
             { "setbit",         HandleDebugSet32BitCommand,            rbac::RBAC_PERM_COMMAND_DEBUG,          Console::No },
@@ -95,6 +112,7 @@ public:
             { "getitemvalue",   HandleDebugGetItemValueCommand,        rbac::RBAC_PERM_COMMAND_DEBUG_INFO,     Console::No },
             { "Mod32Value",     HandleDebugMod32ValueCommand,          rbac::RBAC_PERM_COMMAND_DEBUG,          Console::No },
             { "play",           debugPlayCommandTable },
+            { "reach",          debugReachCommandTable },
             { "send",           debugSendCommandTable },
             { "setaurastate",   HandleDebugSetAuraStateCommand,        rbac::RBAC_PERM_COMMAND_DEBUG,          Console::No },
             { "setitemvalue",   HandleDebugSetItemValueCommand,        rbac::RBAC_PERM_COMMAND_DEBUG,          Console::No },
@@ -1204,6 +1222,151 @@ public:
 
         handler->PSendSysMessage("Playing emote {}", EnumUtils::ToConstant(emote));
 
+        return true;
+    }
+
+    // The far lookups counted under MapUpdate.ReachCounter, ranked by count; the whole table goes to the logs folder
+    static bool HandleDebugReachCallersCommand(ChatHandler* handler)
+    {
+        for (std::string const& line : ReachCounter::Report(30, sLog->GetLogsDir() + "reach-callers.tsv"))
+            handler->SendSysMessage(line);
+        return true;
+    }
+
+    static bool HandleDebugReachResetCommand(ChatHandler* handler)
+    {
+        ReachCounter::Reset();
+        handler->SendSysMessage("reach: table cleared");
+        return true;
+    }
+
+    // One lookup of the target by the subject as its update would make it: on a continent the counter files it as
+    // a far hit when both are on the same map farther apart than the cutoff (flat) and MapUpdate.ReachCounter is on
+    static bool HandleDebugReachTestCommand(ChatHandler* handler, PlayerIdentifier subjectId, PlayerIdentifier targetId)
+    {
+        Player* subject = subjectId.GetConnectedPlayer();
+        Player* target = targetId.GetConnectedPlayer();
+        if (!subject || !target || !subject->IsInWorld() || !target->IsInWorld())
+        {
+            handler->SendErrorMessage("reach test: both players must be online and in the world");
+            return false;
+        }
+
+        Map const* map = subject->GetMap();
+        bool const sameMap = target->FindMap() == map;
+        float const distance = std::hypot(target->GetPositionX() - subject->GetPositionX(),
+                                          target->GetPositionY() - subject->GetPositionY());
+        bool const expected = ReachCounter::Enabled() && ReachCounter::CountsMap(map) && sameMap &&
+                              distance > ReachCounter::Cutoff;
+        std::uint64_t counted = 0;
+        {
+            ReachCounter::TaskScope task(map);
+            ReachCounter::Scope scope(subject);
+            ObjectAccessor::GetPlayer(*subject, target->GetGUID());
+            counted = ReachCounter::TaskFarHits();
+        }
+        handler->PSendSysMessage("reach test: {} -> {} map {} same map {} flat {:.1f} yd counter {} expected +{} "
+                                 "counted +{}", subject->GetName(), target->GetName(), map->GetId(), sameMap,
+                                 distance, ReachCounter::Enabled() ? "on" : "off", expected ? 1 : 0, counted);
+        return true;
+    }
+
+    // One low guid taken from the subject's map and one packet sent to the target, as the subject's update would:
+    // on a continent shared_guid counts +1 (in scope too) and packet_far +1, far when both are on the same map
+    // farther apart than the cutoff (flat); with MapUpdate.ReachCounter off nothing counts. Burns one guid.
+    static bool HandleDebugReachSharedCommand(ChatHandler* handler, PlayerIdentifier subjectId,
+                                              PlayerIdentifier targetId)
+    {
+        Player* subject = subjectId.GetConnectedPlayer();
+        Player* target = targetId.GetConnectedPlayer();
+        if (!subject || !target || subject == target || !subject->IsInWorld() || !target->IsInWorld())
+        {
+            handler->SendErrorMessage("reach shared: two different players must be online and in the world");
+            return false;
+        }
+
+        Map* map = subject->GetMap();
+        bool const sameMap = target->FindMap() == map;
+        float const distance = std::hypot(target->GetPositionX() - subject->GetPositionX(),
+                                          target->GetPositionY() - subject->GetPositionY());
+        bool const counts = ReachCounter::Enabled() && ReachCounter::CountsMap(map);
+        bool const distant = counts && sameMap && distance > ReachCounter::Cutoff;
+        std::uint64_t guids = 0;
+        std::uint64_t guidsInScope = 0;
+        std::uint64_t packets = 0;
+        std::uint64_t packetsFar = 0;
+        {
+            ReachCounter::TaskScope task(map);
+            ReachCounter::Scope scope(subject);
+            map->GenerateLowGuid<HighGuid::Unit>();
+            // The client only refreshes its server time from it; bots ignore it
+            WorldPacket data(SMSG_QUERY_TIME_RESPONSE, 4 + 4);
+            data << uint32(GameTime::GetGameTime().count());
+            data << uint32(0);
+            target->GetSession()->SendPacket(&data);
+            guids = ReachCounter::TaskShared(ReachCounter::SharedGuid, false);
+            guidsInScope = ReachCounter::TaskShared(ReachCounter::SharedGuid, true);
+            packets = ReachCounter::TaskPackets(false);
+            packetsFar = ReachCounter::TaskPackets(true);
+        }
+        handler->PSendSysMessage("reach shared: {} -> {} map {} same map {} flat {:.1f} yd counter {} expected guid "
+                                 "+{} in scope +{} packet +{} far +{} counted guid +{} in scope +{} packet +{} far +{}",
+                                 subject->GetName(), target->GetName(), map->GetId(), sameMap, distance,
+                                 ReachCounter::Enabled() ? "on" : "off", counts ? 1 : 0, counts ? 1 : 0, counts ? 1 : 0,
+                                 distant ? 1 : 0, guids, guidsInScope, packets, packetsFar);
+        return true;
+    }
+
+    // While on, every map pass on a continent takes the census of stored links, not only the sampled one
+    static bool HandleDebugReachCensusOnCommand(ChatHandler* handler)
+    {
+        ReachCounter::SetCensus(true);
+        handler->PSendSysMessage("reach census: every pass (counter {})", ReachCounter::Enabled() ? "on" : "off");
+        return true;
+    }
+
+    static bool HandleDebugReachCensusOffCommand(ChatHandler* handler)
+    {
+        ReachCounter::SetCensus(false);
+        handler->SendSysMessage("reach census: sampled pass only");
+        return true;
+    }
+
+    // The census of each named player's stored links, now: one line per family seen, then the totals
+    static bool HandleDebugReachCensusOnceCommand(ChatHandler* handler, PlayerIdentifier firstId,
+                                                  Optional<PlayerIdentifier> secondId)
+    {
+        std::array<Player*, 2> const players = {firstId.GetConnectedPlayer(),
+                                                secondId ? secondId->GetConnectedPlayer() : nullptr};
+        if (!players[0] || !players[0]->IsInWorld() || (secondId && (!players[1] || !players[1]->IsInWorld())))
+        {
+            handler->SendErrorMessage("reach census: every named player must be online and in the world");
+            return false;
+        }
+
+        for (Player* player : players)
+        {
+            if (!player)
+                continue;
+
+            ReachCounter::LinkTally tally;
+            ReachCounter::Census(*player, ReachCounter::LinkAction::Count, tally);
+            std::uint64_t seen = 0;
+            std::uint64_t distant = 0;
+            for (std::size_t family = 0; family < ReachCounter::LinkFamilyMax; ++family)
+            {
+                if (!tally.seen[family])
+                    continue;
+                char const* name = ReachCounter::LinkFamilyName(family);
+                handler->PSendSysMessage("reach census: {} {} seen {} far {} farthest {:.1f} yd", player->GetName(),
+                                         name ? name : "unnamed", tally.seen[family], tally.distant[family],
+                                         tally.farthest[family]);
+                seen += tally.seen[family];
+                distant += tally.distant[family];
+            }
+            handler->PSendSysMessage("reach census: {} total map {} seen {} far {}", player->GetName(),
+                                     player->GetMapId(), seen, distant);
+        }
         return true;
     }
 

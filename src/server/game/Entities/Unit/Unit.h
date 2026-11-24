@@ -1037,6 +1037,7 @@ public:
     void AddComboPointHolder(Unit* unit) { m_ComboPointHolders.insert(unit); }
     void RemoveComboPointHolder(Unit* unit) { m_ComboPointHolders.erase(unit); }
     void ClearComboPointHolders();
+    [[nodiscard]] std::unordered_set<Unit*> const& GetComboPointHolders() const { return m_ComboPointHolders; }
 
     // PvP
     void SetContestedPvP(Player* attackedPlayer = nullptr, bool lookForNearContestedGuards = true);
@@ -1711,6 +1712,9 @@ public:
     void RemoveAllDynObjects();
 
     [[nodiscard]] GameObject* GetGameObject(uint32 spellId) const;
+    // The census of stored links reads them (ReachCounter::Census)
+    [[nodiscard]] std::list<DynamicObject*> const& GetDynObjects() const { return m_dynObj; }
+    [[nodiscard]] GuidList const& GetGameObjects() const { return m_gameObj; }
     void AddGameObject(GameObject* gameObj);
     void RemoveGameObject(GameObject* gameObj, bool del);
     void RemoveGameObject(uint32 spellid, bool del);

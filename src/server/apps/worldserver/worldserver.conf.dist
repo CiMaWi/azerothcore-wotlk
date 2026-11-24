@@ -1379,6 +1379,18 @@ MapUpdate.Threads = 1
 MapUpdate.UnseenCreatureInterval = 1000
 
 #
+#    MapUpdate.ReachCounter
+#        Description: Count lookups by id that, during an entity's update on maps 0, 1, 530 and 571,
+#                     find an object on the same map farther than 400 yards (measured flat). The
+#                     counts are the count_reach_<site> rows of the lightweight perf snapshot
+#                     (Performance.Lightweight); ".debug reach callers" lists the code locations
+#                     and writes reach-callers.tsv into the logs folder. Reloadable.
+#        Default:     1 - (Enabled)
+#                     0 - (Disabled, a lookup tests one flag)
+
+MapUpdate.ReachCounter = 1
+
+#
 #    MoveMaps.Enable
 #        Description: Enable/Disable pathfinding using mmaps - recommended.
 #        Default:     0 - (Disabled)

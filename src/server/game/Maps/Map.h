@@ -35,6 +35,7 @@
 #include "ObjectGuid.h"
 #include "PathGenerator.h"
 #include "Position.h"
+#include "ReachCounter.h"
 #include "SharedDefines.h"
 #include "SpawnData.h"
 #include "Timer.h"
@@ -530,16 +531,19 @@ public:
     inline ObjectGuid::LowType GenerateLowGuid()
     {
         static_assert(ObjectGuidTraits<high>::MapSpecific, "Only map specific guid can be generated in Map context");
+        ReachCounter::Shared(ReachCounter::SharedGuid);
         return GetGuidSequenceGenerator<high>().Generate();
     }
 
     void AddUpdateObject(Object* obj)
     {
+        ReachCounter::Shared(ReachCounter::SharedUpdateObjects);
         _updateObjects.insert(obj);
     }
 
     void RemoveUpdateObject(Object* obj)
     {
+        ReachCounter::Shared(ReachCounter::SharedUpdateObjects);
         _updateObjects.erase(obj);
     }
 

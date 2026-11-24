@@ -38,6 +38,7 @@
 #include "Object.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
+#include "ReachCounter.h"
 #include "Pet.h"
 #include "PoolMgr.h"
 #include "ScriptMgr.h"
@@ -485,6 +486,7 @@ static void SampleDelayedVisibility(std::unordered_set<Unit*>& movers)
     for (Unit* mover : movers)
     {
         LightweightPerf::VisibilityScope scope(true, mover->IsPlayer());
+        ReachCounter::Scope reach(mover);
         mover->ExecuteDelayedUnitRelocationEvent();
     }
     movers.clear();
@@ -492,6 +494,14 @@ static void SampleDelayedVisibility(std::unordered_set<Unit*>& movers)
 
 void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
 {
+    // Off, or on a map other than the four continents, the reach scopes below cost a flag test
+    ReachCounter::TaskScope reachTask(this);
+    // The pass that rechecks the update list is the perf sample (below): known here, before the timer moves, so the
+    // sessions' time also lands in their players' search cells
+    if (ReachCounter::Enabled() && LightweightPerf::MapTimed() &&
+        _updatableObjectListRecheckTimer.GetCurrent() + static_cast<time_t>(t_diff) >=
+            _updatableObjectListRecheckTimer.GetInterval())
+        ReachCounter::SampleCells();
     uint32 const players = m_mapRefMgr.getSize();
     bool const metrics = players && sMetric->IsEnabled();
     bool const timed = metrics || LightweightPerf::Enabled();
@@ -515,6 +525,7 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
             // Update session
             WorldSession* session = player->GetSession();
             MapSessionFilter updater(session);
+            ReachCounter::Scope reach(player);
             session->Update(s_diff, updater);
             clock.Lap(MAP_SECTION_SESSIONS);
         }
@@ -540,6 +551,8 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
     _updatableObjectListRecheckTimer.Update(t_diff);
     // The recheck update is also the perf sample (UpdateNonPlayerObjects): only it times unit phases and relocations
     bool const sample = _updatableObjectListRecheckTimer.Passed() && LightweightPerf::MapTimed();
+    // The census of stored links rides the sample (or the console switch); off, the flag test is all it costs
+    ReachCounter::LinkTally* const census = ReachCounter::CensusDue(sample) ? ReachCounter::TaskTally() : nullptr;
     resetMarkedCells();
     clock.Lap(MAP_SECTION_MARK_CELLS);
 
@@ -555,8 +568,11 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
             LightweightPerf::UnitScope scope(sample,
                                              player->IsInCombat() ? LightweightPerf::PlayerFight
                                                                   : LightweightPerf::PlayerIdle);
+            ReachCounter::Scope reach(player);
             player->Update(s_diff);
         }
+        if (census)
+            ReachCounter::Census(*player, ReachCounter::LinkAction::Count, *census);
         ++mapSectionStats.playerUpdates;
         clock.Lap(MAP_SECTION_PLAYER_UPDATE);
 
@@ -704,6 +720,7 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
         // The recheck pass is also the perf sample: only here are the cells near players marked, and one pass in
         // 30 s costs nothing
         bool const sampled = LightweightPerf::MapTimed();
+        ReachCounter::LinkTally* const census = ReachCounter::CensusDue(sampled) ? ReachCounter::TaskTally() : nullptr;
         // An object's current cell is open to Map only
         auto const cellMarked = [this](WorldObject* obj)
         {
@@ -723,7 +740,12 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
                 continue;
             }
 
+            if (census)
+                if (Unit* unit = obj->ToUnit())
+                    ReachCounter::Census(*unit, ReachCounter::LinkAction::Count, *census);
+
             uint32 updateDiff = 0;
+            ReachCounter::Scope reach(obj);
             bool updated = TakeUpdateDiff(obj, diff, unseenInterval, updateDiff);
             // A creature that leaves the list first gets the time it gathered on it (interval 0: all it has)
             if (!updated && !obj->IsUpdateNeeded())
@@ -764,15 +786,23 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
     }
     else
     {
+        ReachCounter::LinkTally* const census = ReachCounter::CensusDue(false) ? ReachCounter::TaskTally() : nullptr;
         for (uint32 i = 0; i < _updatableObjectList.size(); ++i)
         {
             WorldObject* obj = _updatableObjectList[i];
             if (!obj->IsInWorld())
                 continue;
 
+            if (census)
+                if (Unit* unit = obj->ToUnit())
+                    ReachCounter::Census(*unit, ReachCounter::LinkAction::Count, *census);
+
             uint32 updateDiff = 0;
             if (TakeUpdateDiff(obj, diff, unseenInterval, updateDiff))
+            {
+                ReachCounter::Scope reach(obj);
                 obj->Update(updateDiff);
+            }
         }
     }
 }
@@ -786,6 +816,7 @@ void Map::AddObjectToPendingUpdateList(WorldObject* obj)
     if (!mapUpdatableObject || mapUpdatableObject->GetUpdateState() != UpdatableMapObject::UpdateState::NotUpdating)
         return;
 
+    ReachCounter::Shared(ReachCounter::SharedUpdateListAdd);
     _pendingAddUpdatableObjectList.insert(obj);
     mapUpdatableObject->SetUpdateState(UpdatableMapObject::UpdateState::PendingAdd);
 }
@@ -799,6 +830,7 @@ void Map::_AddObjectToUpdateList(WorldObject* obj)
     mapUpdatableObject->SetUpdateState(UpdatableMapObject::UpdateState::Updating);
     mapUpdatableObject->SetMapUpdateListOffset(_updatableObjectList.size());
     mapUpdatableObject->_pendingUpdateDiff = 0;
+    ReachCounter::Shared(ReachCounter::SharedUpdateListAdd);
     _updatableObjectList.push_back(obj);
 }
 
@@ -808,6 +840,7 @@ void Map::_RemoveObjectFromUpdateList(WorldObject* obj)
     UpdatableMapObject* mapUpdatableObject = dynamic_cast<UpdatableMapObject*>(obj);
     ASSERT(mapUpdatableObject && mapUpdatableObject->GetUpdateState() == UpdatableMapObject::UpdateState::Updating);
 
+    ReachCounter::Shared(ReachCounter::SharedUpdateListRemove);
     if (obj != _updatableObjectList.back())
     {
         dynamic_cast<UpdatableMapObject*>(_updatableObjectList.back())->SetMapUpdateListOffset(mapUpdatableObject->GetMapUpdateListOffset());
@@ -826,7 +859,10 @@ void Map::RemoveObjectFromMapUpdateList(WorldObject* obj)
 
     UpdatableMapObject* mapUpdatableObject = dynamic_cast<UpdatableMapObject*>(obj);
     if (mapUpdatableObject->GetUpdateState() == UpdatableMapObject::UpdateState::PendingAdd)
+    {
+        ReachCounter::Shared(ReachCounter::SharedUpdateListRemove);
         _pendingAddUpdatableObjectList.erase(obj);
+    }
     else if (mapUpdatableObject->GetUpdateState() == UpdatableMapObject::UpdateState::Updating)
         _RemoveObjectFromUpdateList(obj);
 }
@@ -899,7 +935,10 @@ void Map::HandleDelayedVisibility()
     if (i_objectsForDelayedVisibility.empty())
         return;
     for (std::unordered_set<Unit*>::iterator itr = i_objectsForDelayedVisibility.begin(); itr != i_objectsForDelayedVisibility.end(); ++itr)
+    {
+        ReachCounter::Scope reach(*itr);
         (*itr)->ExecuteDelayedUnitRelocationEvent();
+    }
     i_objectsForDelayedVisibility.clear();
 }
 
@@ -1110,7 +1149,10 @@ void Map::DynamicObjectRelocation(DynamicObject* dynObj, float x, float y, float
 void Map::AddCreatureToMoveList(Creature* c)
 {
     if (c->_moveState == MAP_OBJECT_CELL_MOVE_NONE)
+    {
+        ReachCounter::Shared(ReachCounter::SharedMoveList);
         _creaturesToMove.push_back(c);
+    }
     c->_moveState = MAP_OBJECT_CELL_MOVE_ACTIVE;
 }
 
@@ -1123,7 +1165,10 @@ void Map::RemoveCreatureFromMoveList(Creature* c)
 void Map::AddGameObjectToMoveList(GameObject* go)
 {
     if (go->_moveState == MAP_OBJECT_CELL_MOVE_NONE)
+    {
+        ReachCounter::Shared(ReachCounter::SharedMoveList);
         _gameObjectsToMove.push_back(go);
+    }
     go->_moveState = MAP_OBJECT_CELL_MOVE_ACTIVE;
 }
 
@@ -1136,7 +1181,10 @@ void Map::RemoveGameObjectFromMoveList(GameObject* go)
 void Map::AddDynamicObjectToMoveList(DynamicObject* dynObj)
 {
     if (dynObj->_moveState == MAP_OBJECT_CELL_MOVE_NONE)
+    {
+        ReachCounter::Shared(ReachCounter::SharedMoveList);
         _dynamicObjectsToMove.push_back(dynObj);
+    }
     dynObj->_moveState = MAP_OBJECT_CELL_MOVE_ACTIVE;
 }
 
@@ -2029,6 +2077,7 @@ void Map::AddObjectToRemoveList(WorldObject* obj)
 
     obj->CleanupsBeforeDelete(false);                            // remove or simplify at least cross referenced links
 
+    ReachCounter::Shared(ReachCounter::SharedRemoveList);
     i_objectsToRemove.insert(obj);
     //LOG_DEBUG("maps", "Object ({}) added to removing list.", obj->GetGUID().ToString());
 }
@@ -2639,22 +2688,30 @@ void BattlegroundMap::RemoveAllPlayers()
 
 Corpse* Map::GetCorpse(ObjectGuid const& guid)
 {
-    return _objectsStore.Find<Corpse>(guid);
+    Corpse* corpse = _objectsStore.Find<Corpse>(guid);
+    ReachCounter::Check(ReachCounter::SiteCorpse, corpse);
+    return corpse;
 }
 
 Creature* Map::GetCreature(ObjectGuid const& guid)
 {
-    return _objectsStore.Find<Creature>(guid);
+    Creature* creature = _objectsStore.Find<Creature>(guid);
+    ReachCounter::Check(ReachCounter::SiteCreature, creature);
+    return creature;
 }
 
 GameObject* Map::GetGameObject(ObjectGuid const& guid)
 {
-    return _objectsStore.Find<GameObject>(guid);
+    GameObject* gameObject = _objectsStore.Find<GameObject>(guid);
+    ReachCounter::Check(ReachCounter::SiteGameObject, gameObject);
+    return gameObject;
 }
 
 Pet* Map::GetPet(ObjectGuid const& guid)
 {
-    return dynamic_cast<Pet*>(_objectsStore.Find<Creature>(guid));
+    Pet* pet = dynamic_cast<Pet*>(_objectsStore.Find<Creature>(guid));
+    ReachCounter::Check(ReachCounter::SitePet, pet);
+    return pet;
 }
 
 Transport* Map::GetTransport(ObjectGuid const& guid)
@@ -2668,7 +2725,9 @@ Transport* Map::GetTransport(ObjectGuid const& guid)
 
 DynamicObject* Map::GetDynamicObject(ObjectGuid const& guid)
 {
-    return _objectsStore.Find<DynamicObject>(guid);
+    DynamicObject* dynamicObject = _objectsStore.Find<DynamicObject>(guid);
+    ReachCounter::Check(ReachCounter::SiteDynamicObject, dynamicObject);
+    return dynamicObject;
 }
 
 void Map::UpdateIteratorBack(Player* player)
@@ -2691,6 +2750,7 @@ void Map::SaveCreatureRespawnTime(ObjectGuid::LowType spawnId, time_t& respawnTi
         respawnTime = now + YEAR;
 
     // Remove old queue entry if updating an existing respawn time
+    ReachCounter::Shared(ReachCounter::SharedRespawn);
     auto itr = _creatureRespawnTimes.find(spawnId);
     if (itr != _creatureRespawnTimes.end())
         _respawnQueue.erase({itr->second, SPAWN_TYPE_CREATURE, spawnId});
@@ -2708,6 +2768,7 @@ void Map::SaveCreatureRespawnTime(ObjectGuid::LowType spawnId, time_t& respawnTi
 
 void Map::RemoveCreatureRespawnTime(ObjectGuid::LowType spawnId)
 {
+    ReachCounter::Shared(ReachCounter::SharedRespawn);
     auto itr = _creatureRespawnTimes.find(spawnId);
     if (itr != _creatureRespawnTimes.end())
     {
@@ -2743,6 +2804,7 @@ void Map::SaveGORespawnTime(ObjectGuid::LowType spawnId, time_t& respawnTime)
         respawnTime = now + YEAR;
 
     // Remove old queue entry if updating an existing respawn time
+    ReachCounter::Shared(ReachCounter::SharedRespawn);
     auto itr = _goRespawnTimes.find(spawnId);
     if (itr != _goRespawnTimes.end())
         _respawnQueue.erase({itr->second, SPAWN_TYPE_GAMEOBJECT, spawnId});
@@ -2760,6 +2822,7 @@ void Map::SaveGORespawnTime(ObjectGuid::LowType spawnId, time_t& respawnTime)
 
 void Map::RemoveGORespawnTime(ObjectGuid::LowType spawnId)
 {
+    ReachCounter::Shared(ReachCounter::SharedRespawn);
     auto itr = _goRespawnTimes.find(spawnId);
     if (itr != _goRespawnTimes.end())
     {

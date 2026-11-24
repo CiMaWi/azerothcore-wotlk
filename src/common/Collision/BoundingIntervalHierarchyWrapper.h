@@ -23,6 +23,9 @@
 #include "G3D/Set.h"
 #include "G3D/Table.h"
 
+// Called when balance() rebuilds a tree; the game sets it once before the first map update (the reach counter)
+inline void (*BIHRebuildHook)() = nullptr;
+
 template<class T, class BoundsFunc = BoundsTrait<T>>
 class BIHWrap
 {
@@ -101,6 +104,9 @@ public:
         {
             return;
         }
+
+        if (BIHRebuildHook)
+            BIHRebuildHook();
 
         unbalanced_times = 0;
         m_objects.fastClear();

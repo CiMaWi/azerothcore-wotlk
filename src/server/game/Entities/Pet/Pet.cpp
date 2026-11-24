@@ -75,6 +75,7 @@ void Pet::AddToWorld()
     if (!IsInWorld())
     {
         ///- Register the pet for guid lookup
+        ReachCounter::Shared(ReachCounter::SharedObjectStoreInsert);
         GetMap()->GetObjectsStore().Insert<Creature>(GetGUID(), this);
         Unit::AddToWorld();
         Motion_Initialize();
@@ -126,6 +127,7 @@ void Pet::RemoveFromWorld()
     {
         ///- Don't call the function for Creature, normal mobs + totems go in a different storage
         Unit::RemoveFromWorld();
+        ReachCounter::Shared(ReachCounter::SharedObjectStoreErase);
         GetMap()->GetObjectsStore().Remove<Creature>(GetGUID());
     }
 }
