@@ -38,6 +38,7 @@
 #include "Object.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
+#include "ReachCounter.h"
 #include "Pet.h"
 #include "PoolMgr.h"
 #include "ScriptMgr.h"
@@ -485,6 +486,7 @@ static void SampleDelayedVisibility(std::unordered_set<Unit*>& movers)
     for (Unit* mover : movers)
     {
         LightweightPerf::VisibilityScope scope(true, mover->IsPlayer());
+        ReachCounter::Scope reach(mover);
         mover->ExecuteDelayedUnitRelocationEvent();
     }
     movers.clear();
@@ -492,6 +494,8 @@ static void SampleDelayedVisibility(std::unordered_set<Unit*>& movers)
 
 void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
 {
+    // Off, or on a map other than the four continents, the reach scopes below cost a flag test
+    ReachCounter::TaskScope reachTask(this);
     uint32 const players = m_mapRefMgr.getSize();
     bool const metrics = players && sMetric->IsEnabled();
     bool const timed = metrics || LightweightPerf::Enabled();
@@ -515,6 +519,7 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
             // Update session
             WorldSession* session = player->GetSession();
             MapSessionFilter updater(session);
+            ReachCounter::Scope reach(player);
             session->Update(s_diff, updater);
             clock.Lap(MAP_SECTION_SESSIONS);
         }
@@ -555,6 +560,7 @@ void Map::Update(const uint32 t_diff, const uint32 s_diff, bool  /*thread*/)
             LightweightPerf::UnitScope scope(sample,
                                              player->IsInCombat() ? LightweightPerf::PlayerFight
                                                                   : LightweightPerf::PlayerIdle);
+            ReachCounter::Scope reach(player);
             player->Update(s_diff);
         }
         ++mapSectionStats.playerUpdates;
@@ -724,6 +730,7 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
             }
 
             uint32 updateDiff = 0;
+            ReachCounter::Scope reach(obj);
             bool updated = TakeUpdateDiff(obj, diff, unseenInterval, updateDiff);
             // A creature that leaves the list first gets the time it gathered on it (interval 0: all it has)
             if (!updated && !obj->IsUpdateNeeded())
@@ -772,7 +779,10 @@ void Map::UpdateNonPlayerObjects(uint32 const diff)
 
             uint32 updateDiff = 0;
             if (TakeUpdateDiff(obj, diff, unseenInterval, updateDiff))
+            {
+                ReachCounter::Scope reach(obj);
                 obj->Update(updateDiff);
+            }
         }
     }
 }
@@ -899,7 +909,10 @@ void Map::HandleDelayedVisibility()
     if (i_objectsForDelayedVisibility.empty())
         return;
     for (std::unordered_set<Unit*>::iterator itr = i_objectsForDelayedVisibility.begin(); itr != i_objectsForDelayedVisibility.end(); ++itr)
+    {
+        ReachCounter::Scope reach(*itr);
         (*itr)->ExecuteDelayedUnitRelocationEvent();
+    }
     i_objectsForDelayedVisibility.clear();
 }
 
@@ -2639,22 +2652,30 @@ void BattlegroundMap::RemoveAllPlayers()
 
 Corpse* Map::GetCorpse(ObjectGuid const& guid)
 {
-    return _objectsStore.Find<Corpse>(guid);
+    Corpse* corpse = _objectsStore.Find<Corpse>(guid);
+    ReachCounter::Check(ReachCounter::SiteCorpse, corpse);
+    return corpse;
 }
 
 Creature* Map::GetCreature(ObjectGuid const& guid)
 {
-    return _objectsStore.Find<Creature>(guid);
+    Creature* creature = _objectsStore.Find<Creature>(guid);
+    ReachCounter::Check(ReachCounter::SiteCreature, creature);
+    return creature;
 }
 
 GameObject* Map::GetGameObject(ObjectGuid const& guid)
 {
-    return _objectsStore.Find<GameObject>(guid);
+    GameObject* gameObject = _objectsStore.Find<GameObject>(guid);
+    ReachCounter::Check(ReachCounter::SiteGameObject, gameObject);
+    return gameObject;
 }
 
 Pet* Map::GetPet(ObjectGuid const& guid)
 {
-    return dynamic_cast<Pet*>(_objectsStore.Find<Creature>(guid));
+    Pet* pet = dynamic_cast<Pet*>(_objectsStore.Find<Creature>(guid));
+    ReachCounter::Check(ReachCounter::SitePet, pet);
+    return pet;
 }
 
 Transport* Map::GetTransport(ObjectGuid const& guid)
@@ -2668,7 +2689,9 @@ Transport* Map::GetTransport(ObjectGuid const& guid)
 
 DynamicObject* Map::GetDynamicObject(ObjectGuid const& guid)
 {
-    return _objectsStore.Find<DynamicObject>(guid);
+    DynamicObject* dynamicObject = _objectsStore.Find<DynamicObject>(guid);
+    ReachCounter::Check(ReachCounter::SiteDynamicObject, dynamicObject);
+    return dynamicObject;
 }
 
 void Map::UpdateIteratorBack(Player* player)

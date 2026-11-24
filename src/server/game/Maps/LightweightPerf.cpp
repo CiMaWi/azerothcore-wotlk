@@ -24,6 +24,7 @@
 #include <mutex>
 #include <sstream>
 
+#include "ReachCounter.h"
 #include "UpdateTime.h"
 
 #ifdef _WIN32
@@ -205,7 +206,21 @@ constexpr char const* MapNames[] = {"sessions",
                                     "count_work_mask_updates",
                                     "count_live_ai_checks"};
 static_assert(std::size(WorldNames) == WorldPhaseCount);
-static_assert(std::size(MapNames) == MapRowCount);
+static_assert(std::size(MapNames) == ReachRows);
+
+// The interval's slot of a map, added when new; MaxMaps when the interval is full. intervalMutex held
+std::size_t MapIndex(std::uint32_t mapId)
+{
+    std::size_t index = 0;
+    while (index < interval.mapCount && interval.maps[index].id != mapId)
+        ++index;
+    if (index == interval.mapCount && index < MaxMaps)
+    {
+        interval.maps[index].id = mapId;
+        ++interval.mapCount;
+    }
+    return index;
+}
 
 void WriteRow(std::ostringstream& out, bool& first, std::string const& name, Row const& row, bool counter,
               bool always = false)
@@ -287,20 +302,34 @@ MapScope::~MapScope()
     if (_epoch != epoch.load(std::memory_order_relaxed) || !Enabled())
         return;
 
-    std::size_t index = 0;
-    while (index < interval.mapCount && interval.maps[index].id != _mapId)
-        ++index;
-    if (index == interval.mapCount && index < MaxMaps)
-    {
-        interval.maps[index].id = _mapId;
-        ++interval.mapCount;
-    }
+    std::size_t const index = MapIndex(_mapId);
     if (index == MaxMaps)
         _rows[OverflowTasks].Add(1);
 
     auto& target = interval.maps[index].rows;
     for (std::size_t i = 0; i < MapRowCount; ++i)
         target[i].Merge(_rows[i]);
+}
+
+void MergeMapRows(std::uint32_t mapId, std::size_t first, Row const* rows, std::size_t count)
+{
+    if (!Enabled() || first + count > MapRowCount)
+        return;
+
+    if (activeMap)
+    {
+        for (std::size_t i = 0; i < count; ++i)
+            activeMap->Merge(first + i, rows[i]);
+        return;
+    }
+
+    std::lock_guard<std::mutex> guard(intervalMutex);
+    if (!Enabled())
+        return;
+
+    auto& target = interval.maps[MapIndex(mapId)].rows;
+    for (std::size_t i = 0; i < count; ++i)
+        target[first + i].Merge(rows[i]);
 }
 
 void RecordMapSections(std::uint64_t const* sections, std::uint32_t players, std::uint32_t playerUpdates)
@@ -500,8 +529,13 @@ std::string Snapshot(bool reset, bool metricsEnabled)
         // them still match. The pair counters stand beside every ai row, also while nothing feeds them
         auto const& rows = result.maps[m].rows;
         for (std::size_t i = 0; i < MapRowCount; ++i)
-            WriteRow(out, first, "map/" + id + "/full/" + MapNames[i], rows[i], i >= Players,
-                     i >= WorkMaskUpdates && rows[Ai].calls);
+        {
+            std::string const name = i < ReachRows
+                                         ? std::string(MapNames[i])
+                                         : std::string("count_reach_") + ReachCounter::SiteName(i - ReachRows);
+            WriteRow(out, first, "map/" + id + "/full/" + name, rows[i], i >= Players,
+                     i >= WorkMaskUpdates && i < ReachRows && rows[Ai].calls);
+        }
     }
     out << ']';
 

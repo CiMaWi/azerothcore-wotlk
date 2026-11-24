@@ -65,6 +65,7 @@
 #include "MailMgr.h"
 #include "MapMgr.h"
 #include "LightweightPerf.h"
+#include "ReachCounter.h"
 #include "Metric.h"
 #include "MotdMgr.h"
 #include "ObjectMgr.h"
@@ -248,6 +249,7 @@ void World::LoadConfigSettings(bool reload)
 
     float const previousDayHours = reload ? getFloatConfig(CONFIG_WORLD_DAY_HOURS) : 0.0f;
     _worldConfig.Initialize(reload);
+    ReachCounter::Configure(getBoolConfig(CONFIG_MAP_UPDATE_REACH_COUNTER));
 
     ApplyMoveSpeedRates(getRate(RATE_MOVESPEED_NPC), getRate(RATE_MOVESPEED_PLAYER));
 

@@ -39,10 +39,12 @@
 #include "PoolMgr.h"
 #include "RBAC.h"
 #include "RaceMgr.h"
+#include "ReachCounter.h"
 #include "ScriptMgr.h"
 #include "Transport.h"
 #include "Warden.h"
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <map>
 #include <set>
@@ -78,6 +80,12 @@ public:
             { "setphaseshift",  HandleDebugSendSetPhaseShiftCommand,   rbac::RBAC_PERM_COMMAND_DEBUG,          Console::No },
             { "spellfail",      HandleDebugSendSpellFailCommand,       rbac::RBAC_PERM_COMMAND_DEBUG_COSMETIC, Console::No }
         };
+        static ChatCommandTable debugReachCommandTable =
+        {
+            { "callers",        HandleDebugReachCallersCommand,        rbac::RBAC_PERM_COMMAND_DEBUG_INFO,     Console::Yes},
+            { "reset",          HandleDebugReachResetCommand,          rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes},
+            { "test",           HandleDebugReachTestCommand,           rbac::RBAC_PERM_COMMAND_DEBUG,          Console::Yes}
+        };
         static ChatCommandTable debugCommandTable =
         {
             { "setbit",         HandleDebugSet32BitCommand,            rbac::RBAC_PERM_COMMAND_DEBUG,          Console::No },
@@ -95,6 +103,7 @@ public:
             { "getitemvalue",   HandleDebugGetItemValueCommand,        rbac::RBAC_PERM_COMMAND_DEBUG_INFO,     Console::No },
             { "Mod32Value",     HandleDebugMod32ValueCommand,          rbac::RBAC_PERM_COMMAND_DEBUG,          Console::No },
             { "play",           debugPlayCommandTable },
+            { "reach",          debugReachCommandTable },
             { "send",           debugSendCommandTable },
             { "setaurastate",   HandleDebugSetAuraStateCommand,        rbac::RBAC_PERM_COMMAND_DEBUG,          Console::No },
             { "setitemvalue",   HandleDebugSetItemValueCommand,        rbac::RBAC_PERM_COMMAND_DEBUG,          Console::No },
@@ -1204,6 +1213,52 @@ public:
 
         handler->PSendSysMessage("Playing emote {}", EnumUtils::ToConstant(emote));
 
+        return true;
+    }
+
+    // The far lookups counted under MapUpdate.ReachCounter, ranked by count; the whole table goes to the logs folder
+    static bool HandleDebugReachCallersCommand(ChatHandler* handler)
+    {
+        for (std::string const& line : ReachCounter::Report(30, sLog->GetLogsDir() + "reach-callers.tsv"))
+            handler->SendSysMessage(line);
+        return true;
+    }
+
+    static bool HandleDebugReachResetCommand(ChatHandler* handler)
+    {
+        ReachCounter::Reset();
+        handler->SendSysMessage("reach: table cleared");
+        return true;
+    }
+
+    // One lookup of the target by the subject as its update would make it: on a continent the counter files it as
+    // a far hit when both are on the same map farther apart than the cutoff (flat) and MapUpdate.ReachCounter is on
+    static bool HandleDebugReachTestCommand(ChatHandler* handler, PlayerIdentifier subjectId, PlayerIdentifier targetId)
+    {
+        Player* subject = subjectId.GetConnectedPlayer();
+        Player* target = targetId.GetConnectedPlayer();
+        if (!subject || !target || !subject->IsInWorld() || !target->IsInWorld())
+        {
+            handler->SendErrorMessage("reach test: both players must be online and in the world");
+            return false;
+        }
+
+        Map const* map = subject->GetMap();
+        bool const sameMap = target->FindMap() == map;
+        float const distance = std::hypot(target->GetPositionX() - subject->GetPositionX(),
+                                          target->GetPositionY() - subject->GetPositionY());
+        bool const expected = ReachCounter::Enabled() && ReachCounter::CountsMap(map) && sameMap &&
+                              distance > ReachCounter::Cutoff;
+        std::uint64_t counted = 0;
+        {
+            ReachCounter::TaskScope task(map);
+            ReachCounter::Scope scope(subject);
+            ObjectAccessor::GetPlayer(*subject, target->GetGUID());
+            counted = ReachCounter::TaskFarHits();
+        }
+        handler->PSendSysMessage("reach test: {} -> {} map {} same map {} flat {:.1f} yd counter {} expected +{} "
+                                 "counted +{}", subject->GetName(), target->GetName(), map->GetId(), sameMap,
+                                 distance, ReachCounter::Enabled() ? "on" : "off", expected ? 1 : 0, counted);
         return true;
     }
 

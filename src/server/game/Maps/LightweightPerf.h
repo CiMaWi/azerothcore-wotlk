@@ -49,6 +49,8 @@ enum WorldPhase : std::size_t
 };
 
 constexpr std::size_t MapSectionCount = 11;
+// ReachCounter::SiteCount, checked there
+constexpr std::size_t ReachSiteCount = 11;
 
 // Why a non-player object is on a map's update list: the first reason that holds, in this order. Seen: a player
 // has it in view. Cell: a player's marked cells cover it, but no player sees it. The reasons after those keep an
@@ -125,7 +127,9 @@ enum MapRow : std::size_t
     // Pair counters (calls = all, total = hits): updates with a non-zero work mask, AI checks with live
     WorkMaskUpdates,
     LiveAiChecks,
-    MapRowCount
+    // Pair counters per ReachCounter::Site (calls = lookups made while a subject updates, total = far ones)
+    ReachRows,
+    MapRowCount = ReachRows + ReachSiteCount
 };
 
 bool Enabled();
@@ -141,6 +145,8 @@ void RecordObjectKinds(std::array<Row, ObjectKindCount> const& kinds);
 void UnitLap(UnitPhase phase);
 // Adds visited objects to the current VisibilityScope; none: returns
 void CountChecked(std::uint32_t objects);
+// Merges count rows into the current map task's buffer; outside a task, into the interval of the map
+void MergeMapRows(std::uint32_t mapId, std::size_t first, Row const* rows, std::size_t count);
 // World thread only: it reads the world update-time table, whose percentiles sort it without a lock.
 std::string Snapshot(bool reset, bool metricsEnabled);
 

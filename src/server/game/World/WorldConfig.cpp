@@ -176,6 +176,7 @@ void WorldConfig::BuildConfigCache()
 
     SetConfigValue<uint32>(CONFIG_INTERVAL_MAPUPDATE, "MapUpdateInterval", 10, ConfigValueCache::Reloadable::Yes, [](uint32 const& value) { return value >= MIN_MAP_UPDATE_DELAY; }, ">= MIN_MAP_UPDATE_DELAY");
     SetConfigValue<uint32>(CONFIG_MAP_UPDATE_UNSEEN_CREATURE_INTERVAL, "MapUpdate.UnseenCreatureInterval", 1000, ConfigValueCache::Reloadable::Yes, [](uint32 const& value) { return value <= 60000; }, "<= 60000");
+    SetConfigValue<bool>(CONFIG_MAP_UPDATE_REACH_COUNTER, "MapUpdate.ReachCounter", true, ConfigValueCache::Reloadable::Yes);
 
     SetConfigValue<uint32>(CONFIG_INTERVAL_CHANGEWEATHER, "ChangeWeatherInterval", 600000);
 
