@@ -123,7 +123,7 @@ struct npc_love_in_air_snivel : public NullCreatureAI
     bool AllowAction(Player* player)
     {
         uint16 slot = player->FindQuestSlot(player->GetTeamId() == TEAM_ALLIANCE ? QUEST_HOT_ON_TRAIL_ALLY : QUEST_HOT_ON_TRAIL_HORDE);
-        if (slot >= MAX_QUEST_LOG_SIZE)
+        if (slot >= player->GetQuestLogSize())
             return false;
 
         QuestStatusData& qData = player->getQuestStatusMap()[(player->GetTeamId() == TEAM_ALLIANCE ? QUEST_HOT_ON_TRAIL_ALLY : QUEST_HOT_ON_TRAIL_HORDE)];

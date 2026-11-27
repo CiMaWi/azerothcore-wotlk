@@ -12690,7 +12690,7 @@ bool Player::IsSpellFitByClassAndRace(uint32 spell_id) const
 
 bool Player::HasQuestForGO(int32 GOId) const
 {
-    for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    for (uint16 i = 0; i < GetQuestLogSize(); ++i)
     {
         uint32 questid = GetQuestSlotQuestId(i);
         if (questid == 0)

@@ -101,7 +101,7 @@ void Player::PrepareQuestMenu(ObjectGuid guid)
 
 bool Player::HasQuest(uint32 questId) const
 {
-    for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    for (uint16 i = 0; i < GetQuestLogSize(); ++i)
     {
         uint32 questid = GetQuestSlotQuestId(i);
         if (questid == questId)
@@ -521,7 +521,7 @@ void Player::AddQuest(Quest const* quest, Object* questGiver)
 {
     uint16 log_slot = FindQuestSlot(0);
 
-    if (log_slot >= MAX_QUEST_LOG_SIZE) // Player does not have any free slot in the quest log
+    if (!ReserveQuestSlot(log_slot)) // Player does not have any free slot in the quest log
         return;
 
     uint32 quest_id = quest->GetQuestId();
@@ -623,7 +623,7 @@ void Player::CompleteQuest(uint32 quest_id)
     SetQuestStatus(quest_id, QUEST_STATUS_COMPLETE);
 
     auto log_slot = FindQuestSlot(quest_id);
-    if (log_slot < MAX_QUEST_LOG_SIZE)
+    if (log_slot < GetQuestLogSize())
     {
         SetQuestSlotState(log_slot, QUEST_STATE_COMPLETE);
     }
@@ -662,7 +662,7 @@ void Player::IncompleteQuest(uint32 quest_id)
         SetQuestStatus(quest_id, QUEST_STATUS_INCOMPLETE);
 
         uint16 log_slot = FindQuestSlot(quest_id);
-        if (log_slot < MAX_QUEST_LOG_SIZE)
+        if (log_slot < GetQuestLogSize())
             RemoveQuestSlotState(log_slot, QUEST_STATE_COMPLETE);
 
         // Xinef: area auras may change on quest completion!
@@ -753,7 +753,7 @@ void Player::RewardQuest(Quest const* quest, uint32 reward, Object* questGiver, 
     RewardReputation(quest);
 
     uint16 log_slot = FindQuestSlot(quest_id);
-    if (log_slot < MAX_QUEST_LOG_SIZE)
+    if (log_slot < GetQuestLogSize())
         SetQuestSlot(log_slot, 0);
 
     bool const rewarded = IsQuestRewarded(quest_id) && !quest->IsDFQuest() && !(quest->IsDaily() || quest->IsWeekly() || quest->IsMonthly());
@@ -923,7 +923,7 @@ void Player::FailQuest(uint32 questId)
 
         uint16 log_slot = FindQuestSlot(questId);
 
-        if (log_slot < MAX_QUEST_LOG_SIZE)
+        if (log_slot < GetQuestLogSize())
         {
             SetQuestSlotTimer(log_slot, 1);
             SetQuestSlotState(log_slot, QUEST_STATE_FAIL);
@@ -1026,7 +1026,7 @@ bool Player::SatisfyQuestLevel(Quest const* qInfo, bool msg) const
 bool Player::SatisfyQuestLog(bool msg)
 {
     // exist free slot
-    if (FindQuestSlot(0) < MAX_QUEST_LOG_SIZE)
+    if (HasUnlimitedQuestLog() || FindQuestSlot(0) < GetQuestLogSize())
         return true;
 
     if (msg)
@@ -1856,11 +1856,50 @@ void Player::AdjustQuestReqItemCount(Quest const* quest, QuestStatusData& questS
 
 uint16 Player::FindQuestSlot(uint32 quest_id) const
 {
-    for (uint16 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    for (uint16 i = 0; i < GetQuestLogSize(); ++i)
         if (GetQuestSlotQuestId(i) == quest_id)
             return i;
 
-    return MAX_QUEST_LOG_SIZE;
+    return GetQuestLogSize();
+}
+
+// Whether the slot exists; a log without a limit first grows up to it (the playerbots fork, questing WQ40)
+bool Player::ReserveQuestSlot(uint16 slot)
+{
+    if (slot < GetQuestLogSize())
+        return true;
+
+    if (!m_unlimitedQuestLog || slot == std::numeric_limits<uint16>::max())
+        return false;
+
+    m_extraQuestSlots.resize(slot - MAX_QUEST_LOG_SIZE + 1);
+    return true;
+}
+
+// A swap that touches a slot from MAX_QUEST_LOG_SIZE on: by value through the accessors
+void Player::SwapExtraQuestSlot(uint16 slot1, uint16 slot2)
+{
+    if (slot1 >= GetQuestLogSize() || slot2 >= GetQuestLogSize())
+        return;
+
+    auto read = [this](uint16 slot)
+    {
+        QuestLogExtraSlot values{GetQuestSlotQuestId(slot), GetQuestSlotState(slot), 0, GetQuestSlotTime(slot)};
+        for (uint8 counter = 0; counter < sizeof(uint64) / sizeof(uint16); ++counter)
+            values.Counts |= (uint64)GetQuestSlotCounter(slot, counter) << (counter * 16);
+        return values;
+    };
+    auto write = [this](uint16 slot, QuestLogExtraSlot const& values)
+    {
+        SetQuestSlot(slot, values.QuestId, values.Time);
+        SetQuestSlotState(slot, values.State);
+        for (uint8 counter = 0; counter < sizeof(uint64) / sizeof(uint16); ++counter)
+            SetQuestSlotCounter(slot, counter, (uint16)(values.Counts >> (counter * 16)));
+    };
+
+    QuestLogExtraSlot const first = read(slot1);
+    write(slot1, read(slot2));
+    write(slot2, first);
 }
 
 void Player::AreaExploredOrEventHappens(uint32 questId)
@@ -1869,7 +1908,7 @@ void Player::AreaExploredOrEventHappens(uint32 questId)
     {
         uint16 log_slot = FindQuestSlot(questId);
         QuestStatusData* q_status = nullptr;
-        if (log_slot < MAX_QUEST_LOG_SIZE)
+        if (log_slot < GetQuestLogSize())
         {
             q_status = &m_QuestStatus[questId];
 
@@ -1909,7 +1948,7 @@ void Player::GroupEventHappens(uint32 questId, WorldObject const* pEventObject)
 
 void Player::ItemAddedQuestCheck(uint32 entry, uint32 count)
 {
-    for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    for (uint16 i = 0; i < GetQuestLogSize(); ++i)
     {
         uint32 questid = GetQuestSlotQuestId(i);
         if (questid == 0)
@@ -1948,7 +1987,7 @@ void Player::ItemAddedQuestCheck(uint32 entry, uint32 count)
 
 void Player::ItemRemovedQuestCheck(uint32 entry, uint32 count)
 {
-    for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    for (uint16 i = 0; i < GetQuestLogSize(); ++i)
     {
         uint32 questid = GetQuestSlotQuestId(i);
         if (!questid)
@@ -2013,7 +2052,7 @@ void Player::KilledMonsterCredit(uint32 entry, ObjectGuid guid)
     StartTimedAchievement(ACHIEVEMENT_TIMED_TYPE_CREATURE, real_entry);   // MUST BE CALLED FIRST
     UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_KILL_CREATURE, real_entry, addkillcount, guid ? GetMap()->GetCreature(guid) : nullptr);
 
-    for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    for (uint16 i = 0; i < GetQuestLogSize(); ++i)
     {
         uint32 questid = GetQuestSlotQuestId(i);
         if (!questid)
@@ -2069,7 +2108,7 @@ void Player::KilledMonsterCredit(uint32 entry, ObjectGuid guid)
 
 void Player::KilledPlayerCredit(uint16 count)
 {
-    for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    for (uint16 i = 0; i < GetQuestLogSize(); ++i)
     {
         uint32 questid = GetQuestSlotQuestId(i);
         if (!questid)
@@ -2131,7 +2170,7 @@ void Player::KilledPlayerCreditForQuest(uint16 count, Quest const* quest)
 void Player::KillCreditGO(uint32 entry, ObjectGuid guid)
 {
     uint16 addCastCount = 1;
-    for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    for (uint16 i = 0; i < GetQuestLogSize(); ++i)
     {
         uint32 questid = GetQuestSlotQuestId(i);
         if (!questid)
@@ -2187,7 +2226,7 @@ void Player::KillCreditGO(uint32 entry, ObjectGuid guid)
 void Player::TalkedToCreature(uint32 entry, ObjectGuid guid)
 {
     uint16 addTalkCount = 1;
-    for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    for (uint16 i = 0; i < GetQuestLogSize(); ++i)
     {
         uint32 questid = GetQuestSlotQuestId(i);
         if (!questid)
@@ -2245,7 +2284,7 @@ void Player::TalkedToCreature(uint32 entry, ObjectGuid guid)
 
 void Player::MoneyChanged(uint32 count)
 {
-    for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    for (uint16 i = 0; i < GetQuestLogSize(); ++i)
     {
         uint32 questid = GetQuestSlotQuestId(i);
         if (!questid)
@@ -2282,7 +2321,7 @@ void Player::MoneyChanged(uint32 count)
 
 void Player::ReputationChanged(FactionEntry const* factionEntry)
 {
-    for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    for (uint16 i = 0; i < GetQuestLogSize(); ++i)
     {
         if (uint32 questid = GetQuestSlotQuestId(i))
         {
@@ -2310,7 +2349,7 @@ void Player::ReputationChanged(FactionEntry const* factionEntry)
 
 void Player::ReputationChanged2(FactionEntry const* factionEntry)
 {
-    for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    for (uint16 i = 0; i < GetQuestLogSize(); ++i)
     {
         if (uint32 questid = GetQuestSlotQuestId(i))
         {
@@ -2338,7 +2377,7 @@ void Player::ReputationChanged2(FactionEntry const* factionEntry)
 
 bool Player::HasQuestForItem(uint32 itemid, uint32 excludeQuestId /* 0 */, bool turnIn /* false */, bool* showInLoot /*= nullptr*/) const
 {
-    for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    for (uint16 i = 0; i < GetQuestLogSize(); ++i)
     {
         uint32 questid = GetQuestSlotQuestId(i);
         if (questid == 0 || questid == excludeQuestId)
@@ -2544,7 +2583,7 @@ void Player::SendQuestUpdateAddCreatureOrGo(Quest const* quest, ObjectGuid guid,
     LOG_DEBUG("network", "WORLD: Sent SMSG_QUESTUPDATE_ADD_KILL");
 
     uint16 log_slot = FindQuestSlot(quest->GetQuestId());
-    if (log_slot < MAX_QUEST_LOG_SIZE)
+    if (log_slot < GetQuestLogSize())
         SetQuestSlotCounter(log_slot, creatureOrGO_idx, GetQuestSlotCounter(log_slot, creatureOrGO_idx) + add_count);
 }
 
@@ -2560,13 +2599,13 @@ void Player::SendQuestUpdateAddPlayer(Quest const* quest, uint16 old_count, uint
     LOG_DEBUG("network", "WORLD: Sent SMSG_QUESTUPDATE_ADD_PVP_KILL");
 
     uint16 log_slot = FindQuestSlot(quest->GetQuestId());
-    if (log_slot < MAX_QUEST_LOG_SIZE)
+    if (log_slot < GetQuestLogSize())
         SetQuestSlotCounter(log_slot, QUEST_PVP_KILL_SLOT, GetQuestSlotCounter(log_slot, QUEST_PVP_KILL_SLOT) + add_count);
 }
 
 bool Player::HasPvPForcingQuest() const
 {
-    for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    for (uint16 i = 0; i < GetQuestLogSize(); ++i)
     {
         uint32 questId = GetQuestSlotQuestId(i);
         if (questId == 0)

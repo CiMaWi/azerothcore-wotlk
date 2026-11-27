@@ -614,6 +614,16 @@ enum QuestSlotOffsets
 
 #define MAX_QUEST_OFFSET 5
 
+// A quest log slot beyond the client's 25 (the playerbots fork, questing WQ40): the five values a slot's update fields
+// hold, kept on the server only
+struct QuestLogExtraSlot
+{
+    uint32 QuestId = 0;
+    uint32 State = 0;
+    uint64 Counts = 0;
+    uint32 Time = 0;
+};
+
 enum QuestSlotStateMask
 {
     QUEST_STATE_NONE     = 0x0000,
@@ -1507,12 +1517,46 @@ public:
     void ResetSeasonalQuestStatus(uint16 event_id);
 
     [[nodiscard]] uint16 FindQuestSlot(uint32 quest_id) const;
-    [[nodiscard]] uint32 GetQuestSlotQuestId(uint16 slot) const { return GetUInt32Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_ID_OFFSET); }
-    [[nodiscard]] uint32 GetQuestSlotState(uint16 slot)   const { return GetUInt32Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_STATE_OFFSET); }
-    [[nodiscard]] uint16 GetQuestSlotCounter(uint16 slot, uint8 counter) const { return (uint16)(GetUInt64Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_COUNTS_OFFSET) >> (counter * 16)); }
-    [[nodiscard]] uint32 GetQuestSlotTime(uint16 slot)    const { return GetUInt32Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_TIME_OFFSET); }
+    // The playerbots fork (questing WQ40): slots 0 to 24 are the client's update fields. A player marked "no limit" (a
+    // bot no client ever plays; the mark is set before its quests load) gets further slots, kept on the server only.
+    // GetQuestLogSize() is the bound of every loop over the slots and FindQuestSlot's "not found"; without the mark it
+    // is MAX_QUEST_LOG_SIZE. A slot beyond it reads as empty and takes no write
+    [[nodiscard]] uint16 GetQuestLogSize() const { return uint16(MAX_QUEST_LOG_SIZE + m_extraQuestSlots.size()); }
+    [[nodiscard]] bool HasUnlimitedQuestLog() const { return m_unlimitedQuestLog; }
+    void SetUnlimitedQuestLog(bool unlimited) { m_unlimitedQuestLog = unlimited; }
+    [[nodiscard]] uint32 GetQuestSlotQuestId(uint16 slot) const
+    {
+        if (slot >= MAX_QUEST_LOG_SIZE)
+            return GetExtraQuestSlot(slot).QuestId;
+        return GetUInt32Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_ID_OFFSET);
+    }
+    [[nodiscard]] uint32 GetQuestSlotState(uint16 slot) const
+    {
+        if (slot >= MAX_QUEST_LOG_SIZE)
+            return GetExtraQuestSlot(slot).State;
+        return GetUInt32Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_STATE_OFFSET);
+    }
+    [[nodiscard]] uint16 GetQuestSlotCounter(uint16 slot, uint8 counter) const
+    {
+        if (slot >= MAX_QUEST_LOG_SIZE)
+            return (uint16)(GetExtraQuestSlot(slot).Counts >> (counter * 16));
+        uint64 const counts = GetUInt64Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_COUNTS_OFFSET);
+        return (uint16)(counts >> (counter * 16));
+    }
+    [[nodiscard]] uint32 GetQuestSlotTime(uint16 slot) const
+    {
+        if (slot >= MAX_QUEST_LOG_SIZE)
+            return GetExtraQuestSlot(slot).Time;
+        return GetUInt32Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_TIME_OFFSET);
+    }
     void SetQuestSlot(uint16 slot, uint32 quest_id, uint32 timer = 0)
     {
+        if (slot >= MAX_QUEST_LOG_SIZE)
+        {
+            if (QuestLogExtraSlot* extra = FindExtraQuestSlot(slot))
+                *extra = {quest_id, 0, 0, timer};
+            return;
+        }
         SetUInt32Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_ID_OFFSET, quest_id);
         SetUInt32Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_STATE_OFFSET, 0);
         SetUInt32Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_COUNTS_OFFSET, 0);
@@ -1521,16 +1565,58 @@ public:
     }
     void SetQuestSlotCounter(uint16 slot, uint8 counter, uint16 count)
     {
+        if (slot >= MAX_QUEST_LOG_SIZE)
+        {
+            if (QuestLogExtraSlot* extra = FindExtraQuestSlot(slot))
+            {
+                extra->Counts &= ~((uint64)0xFFFF << (counter * 16));
+                extra->Counts |= ((uint64)count << (counter * 16));
+            }
+            return;
+        }
         uint64 val = GetUInt64Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_COUNTS_OFFSET);
         val &= ~((uint64)0xFFFF << (counter * 16));
         val |= ((uint64)count << (counter * 16));
         SetUInt64Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_COUNTS_OFFSET, val);
     }
-    void SetQuestSlotState(uint16 slot, uint32 state) { SetFlag(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_STATE_OFFSET, state); }
-    void RemoveQuestSlotState(uint16 slot, uint32 state) { RemoveFlag(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_STATE_OFFSET, state); }
-    void SetQuestSlotTimer(uint16 slot, uint32 timer) { SetUInt32Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_TIME_OFFSET, timer); }
+    void SetQuestSlotState(uint16 slot, uint32 state)
+    {
+        if (slot >= MAX_QUEST_LOG_SIZE)
+        {
+            if (QuestLogExtraSlot* extra = FindExtraQuestSlot(slot))
+                extra->State |= state;
+            return;
+        }
+        SetFlag(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_STATE_OFFSET, state);
+    }
+    void RemoveQuestSlotState(uint16 slot, uint32 state)
+    {
+        if (slot >= MAX_QUEST_LOG_SIZE)
+        {
+            if (QuestLogExtraSlot* extra = FindExtraQuestSlot(slot))
+                extra->State &= ~state;
+            return;
+        }
+        RemoveFlag(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_STATE_OFFSET, state);
+    }
+    void SetQuestSlotTimer(uint16 slot, uint32 timer)
+    {
+        if (slot >= MAX_QUEST_LOG_SIZE)
+        {
+            if (QuestLogExtraSlot* extra = FindExtraQuestSlot(slot))
+                extra->Time = timer;
+            return;
+        }
+        SetUInt32Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_TIME_OFFSET, timer);
+    }
     void SwapQuestSlot(uint16 slot1, uint16 slot2)
     {
+        if (slot1 >= MAX_QUEST_LOG_SIZE || slot2 >= MAX_QUEST_LOG_SIZE)
+        {
+            SwapExtraQuestSlot(slot1, slot2);
+            return;
+        }
+
         for (int i = 0; i < MAX_QUEST_OFFSET; ++i)
         {
             uint32 temp1 = GetUInt32Value(PLAYER_QUEST_LOG_1_1 + MAX_QUEST_OFFSET * slot1 + i);
@@ -2870,6 +2956,24 @@ protected:
 
     QuestStatusMap m_QuestStatus;
     QuestStatusSaveMap m_QuestStatusSave;
+
+    // The quest log's slots from MAX_QUEST_LOG_SIZE on (questing WQ40). They grow where a quest is added or loaded
+    // (ReserveQuestSlot) and never shrink: a cleared slot stays as a free one
+    [[nodiscard]] QuestLogExtraSlot const& GetExtraQuestSlot(uint16 slot) const
+    {
+        static constexpr QuestLogExtraSlot empty{};
+        std::size_t const index = slot - MAX_QUEST_LOG_SIZE;
+        return index < m_extraQuestSlots.size() ? m_extraQuestSlots[index] : empty;
+    }
+    [[nodiscard]] QuestLogExtraSlot* FindExtraQuestSlot(uint16 slot)
+    {
+        std::size_t const index = slot - MAX_QUEST_LOG_SIZE;
+        return index < m_extraQuestSlots.size() ? &m_extraQuestSlots[index] : nullptr;
+    }
+    bool ReserveQuestSlot(uint16 slot);
+    void SwapExtraQuestSlot(uint16 slot1, uint16 slot2);
+    bool m_unlimitedQuestLog = false;
+    std::vector<QuestLogExtraSlot> m_extraQuestSlots;
 
     RewardedQuestSet m_RewardedQuests;
     QuestStatusSaveMap m_RewardedQuestsSave;
