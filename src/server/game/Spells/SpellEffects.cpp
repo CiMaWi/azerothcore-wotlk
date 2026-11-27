@@ -5011,7 +5011,7 @@ void Spell::EffectQuestComplete(SpellEffIndex effIndex)
             return;
 
         uint16 logSlot = player->FindQuestSlot(questId);
-        if (logSlot < MAX_QUEST_LOG_SIZE)
+        if (logSlot < player->GetQuestLogSize())
             player->AreaExploredOrEventHappens(questId);
         else if (player->CanTakeQuest(quest, false)) // Check if the quest has already been turned in.
             player->SetRewardedQuest(questId);           // If not, set status to rewarded without broadcasting it to client.
@@ -5369,7 +5369,7 @@ void Spell::EffectQuestClear(SpellEffIndex effIndex)
         return;
 
     // remove all quest entries for 'entry' from quest log
-    for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+    for (uint16 slot = 0; slot < player->GetQuestLogSize(); ++slot)
     {
         uint32 logQuest = player->GetQuestSlotQuestId(slot);
         if (logQuest == quest_id)

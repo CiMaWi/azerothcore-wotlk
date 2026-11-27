@@ -6456,7 +6456,7 @@ void Player::_LoadQuestStatus(PreparedQueryResult result)
                 questStatusData.PlayerCount = fields[14].Get<uint16>();
 
                 // add to quest log
-                if (slot < MAX_QUEST_LOG_SIZE && questStatusData.Status != QUEST_STATUS_NONE)
+                if (questStatusData.Status != QUEST_STATUS_NONE && ReserveQuestSlot(slot))
                 {
                     SetQuestSlot(slot, quest_id, uint32(quest_time)); // cast can't be helped
 
@@ -6481,7 +6481,7 @@ void Player::_LoadQuestStatus(PreparedQueryResult result)
     }
 
     // clear quest log tail
-    for (uint16 i = slot; i < MAX_QUEST_LOG_SIZE; ++i)
+    for (uint16 i = slot; i < GetQuestLogSize(); ++i)
         SetQuestSlot(i, 0);
 }
 

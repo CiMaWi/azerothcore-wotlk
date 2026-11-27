@@ -385,7 +385,8 @@ void WorldSession::HandleQuestgiverCancel(WorldPacket& /*recvData*/)
 
 void WorldSession::HandleQuestLogSwapQuest(WorldPackets::Quest::QuestLogSwapQuest& packet)
 {
-    if (packet.Slot1 == packet.Slot2 || packet.Slot1 >= MAX_QUEST_LOG_SIZE || packet.Slot2 >= MAX_QUEST_LOG_SIZE)
+    if (packet.Slot1 == packet.Slot2 || packet.Slot1 >= _player->GetQuestLogSize() ||
+        packet.Slot2 >= _player->GetQuestLogSize())
         return;
 
     LOG_DEBUG("network", "WORLD: Received CMSG_QUESTLOG_SWAP_QUEST slot 1 = {}, slot 2 = {}", packet.Slot1, packet.Slot2);
@@ -397,7 +398,7 @@ void WorldSession::HandleQuestLogRemoveQuest(WorldPackets::Quest::QuestLogRemove
 {
     LOG_DEBUG("network", "WORLD: Received CMSG_QUESTLOG_REMOVE_QUEST slot = {}", packet.Slot);
 
-    if (packet.Slot < MAX_QUEST_LOG_SIZE)
+    if (packet.Slot < _player->GetQuestLogSize())
     {
         if (uint32 questId = _player->GetQuestSlotQuestId(packet.Slot))
         {
